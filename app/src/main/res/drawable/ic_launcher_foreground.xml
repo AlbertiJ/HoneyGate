@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.65"
+        android:scaleY="0.65"
+        android:translateX="18.9"
+        android:translateY="18.9">
+        <!-- Escudo Perimetral Exterior -->
+        <path
+            android:fillColor="#1500ff66"
+            android:strokeColor="#00ff66"
+            android:strokeWidth="3.5"
+            android:strokeLineJoin="round"
+            android:pathData="M54,14 L86,26 C86,60 54,92 54,92 C54,92 22,60 22,26 Z" />
+        
+        <!-- Emblema Honeywall Interior (Hexágono / Celda Defensiva) -->
+        <path
+            android:fillColor="#2500d4ff"
+            android:strokeColor="#00d4ff"
+            android:strokeWidth="2.5"
+            android:pathData="M54,32 L70,42 L70,62 L54,72 L38,62 L38,42 Z" />
+        
+        <!-- Núcleo de Contención -->
+        <path
+            android:fillColor="#00ff66"
+            android:pathData="M54,46 A6,6 0 1,0 54,58 A6,6 0 1,0 54,46 Z" />
+            
+        <!-- Rayos de Conexión y Monitoreo -->
+        <path
+            android:strokeColor="#00ff66"
+            android:strokeWidth="2"
+            android:pathData="M54,32 L54,46 M54,58 L54,72 M38,52 L48,52 M60,52 L70,52" />
+    </group>
+</vector>
