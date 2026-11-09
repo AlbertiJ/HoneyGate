@@ -11,5 +11,14 @@ Este documento establece las directrices fundamentales de desarrollo, documentac
 
 ---
 
-### Registro de Reglas Futuras (Pendientes de Incorporación)
-* *(Espacio reservado para las siguientes reglas técnicas, arquitectónicas y de seguridad según la evolución del proyecto)*.
+### Regla 2: Persistencia Forense y Trazabilidad Local (Room DB)
+* **Persistencia reactiva con Flow**: Todos los eventos forenses, sesiones capturadas y estados de contención deben persistirse localmente mediante Android Room, exponiendo `Flow<T>` en DAOs y `StateFlow<T>` en ViewModels.
+* **Estados canónicos de contención**: Todo registro de seguridad debe categorizarse bajo los tres estados canónicos: `'Blocked'` (Contención estricta), `'Alerted'` (Bajo observación y auditoría activa) y `'Normal'` (Tráfico nominal verificado).
+* **Correlación IP/MAC**: Se debe preservar el historial de direcciones físicas MAC y sus asignaciones de IP dinámicas, manteniendo el rastreo de múltiples identidades asociadas para evitar elusión por renovación DHCP.
+
+---
+
+### Regla 3: Arquitectura Honeygate (Puertas de Miel de Decepción)
+* **Navegación permisiva engañosa**: Si un host genera anomalías (múltiples registros, fallo de credenciales), el sistema no debe cortar la conexión inmediatamente; debe mantener la navegación permitida en modo engañoso auditando los destinos para recopilar inteligencia de amenazas (IoCs).
+* **Contención de inyecciones**: Los intentos de Inyección SQL (SQLi) deben ser correlacionados de inmediato con las identidades de la MAC y reportados al panel de administración para bloqueo en cascada.
+* **Estándar de Informes de Ingeniería**: Los informes para el equipo defensivo (Blue Team) deben apegarse a la taxonomía MITRE ATT&CK, matriz de correlación forense y planes de mitigación accionables.
