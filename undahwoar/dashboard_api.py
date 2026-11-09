@@ -8,7 +8,9 @@ Endpoints REST JSON en Memoria y Dashboard Web HTML5/JS en Tiempo Real
 import os
 import json
 import time
+import secrets
 import logging
+import ipaddress
 import threading
 from typing import Dict, Any, Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -176,6 +178,9 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <script>
+        // INVARIANTE 3: escapar todo dato externo (logs, alertas, Cowrie) antes de insertarlo -> anti-XSS
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const API_TOKEN = "__API_TOKEN__";  // inyectado por el servidor local al servir la página
         async function fetchMetrics() {
             try {
                 const res = await fetch('/api/status');
@@ -196,10 +201,10 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                         const pct = Math.min(100, (rate / 10) * 100);
                         const color = rate >= 8 ? '#ff3366' : (rate >= 5 ? '#ffcc00' : '#00ff66');
                         return `<tr>
-                            <td><code>${s.fd}</code></td>
-                            <td><strong>${s.ip}</strong></td>
-                            <td>${s.port}</td>
-                            <td><code>${s.mac}</code></td>
+                            <td><code>${esc(s.fd)}</code></td>
+                            <td><strong>${esc(s.ip)}</strong></td>
+                            <td>${esc(s.port)}</td>
+                            <td><code>${esc(s.mac)}</code></td>
                             <td style="min-width: 100px;">
                                 <div style="display: flex; justify-content: space-between; font-size: 11px;">
                                     <span>${rate}/10 req/m</span>
@@ -209,7 +214,7 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                                 </div>
                             </td>
                             <td>${s.duration_sec}s</td>
-                            <td><button class="btn-action" onclick="isolateIP('${s.ip}')">Aislar</button></td>
+                            <td><button class="btn-action" onclick="isolateIP('${esc(s.ip)}')">Aislar</button></td>
                         </tr>`;
                     }).join('');
                 }
@@ -224,10 +229,10 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                         const info = data.isolated_ips[ip];
                         const dateStr = new Date(info.isolated_at * 1000).toLocaleTimeString();
                         return `<tr>
-                            <td><strong style="color: #ff3366;">${ip}</strong></td>
-                            <td>${info.reason}</td>
-                            <td>${dateStr}</td>
-                            <td><button class="btn-action btn-unblock" onclick="unblockIP('${ip}')">Desbloquear</button></td>
+                            <td><strong style="color: #ff3366;">${esc(ip)}</strong></td>
+                            <td>${esc(info.reason)}</td>
+                            <td>${esc(dateStr)}</td>
+                            <td><button class="btn-action btn-unblock" onclick="unblockIP('${esc(ip)}')">Desbloquear</button></td>
                         </tr>`;
                     }).join('');
                 }
@@ -241,10 +246,10 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                     alertContainer.innerHTML = alerts.slice().reverse().map(a => `
                         <div class="alert-item ${a.severity}">
                             <div class="alert-header">
-                                <span style="color: ${a.severity === 'critical' ? '#ff3366' : '#ffcc00'};">${a.title}</span>
-                                <span class="alert-time">${a.date.split(' ')[1]}</span>
+                                <span style="color: ${a.severity === 'critical' ? '#ff3366' : '#ffcc00'};">${esc(a.title)}</span>
+                                <span class="alert-time">${esc((a.date || '').split(' ')[1] || '')}</span>
                             </div>
-                            <div class="alert-body">${a.message}</div>
+                            <div class="alert-body">${esc(a.message)}</div>
                         </div>
                     `).join('');
                 }
@@ -257,7 +262,7 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
             if (!confirm(`¿Confirmas el aislamiento forzado inmediato de ${ip}?`)) return;
             await fetch('/api/isolate', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {'Content-Type': 'application/json', 'X-Auth-Token': API_TOKEN},
                 body: JSON.stringify({ip: ip, reason: 'Aislamiento manual desde Web Dashboard'})
             });
             fetchMetrics();
@@ -266,7 +271,7 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         async function unblockIP(ip) {
             await fetch('/api/unblock', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: {'Content-Type': 'application/json', 'X-Auth-Token': API_TOKEN},
                 body: JSON.stringify({ip: ip})
             });
             fetchMetrics();
@@ -286,6 +291,16 @@ class UndahwoarHTTPRequestHandler(BaseHTTPRequestHandler):
     """
     honeywall: UndahwoarHoneywall = None
     forensics: ForensicAlertManager = None
+    auth_token: Optional[str] = None  # INVARIANTE 2: token para endpoints de control
+
+    @staticmethod
+    def _valid_ip(value: Any) -> bool:
+        """INVARIANTE 6: valida que 'value' sea una IP real antes de actuar sobre ella."""
+        try:
+            ipaddress.ip_address(str(value))
+            return True
+        except ValueError:
+            return False
 
     def log_message(self, format, *args):
         # Suprimir logs HTTP verbosos en stdout para mantener la terminal limpia para el CLI
@@ -296,10 +311,12 @@ class UndahwoarHTTPRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/" or path == "/dashboard":
+            # Inyecta el token en la página servida (solo accesible en 127.0.0.1)
+            html = HTML_DASHBOARD_TEMPLATE.replace("__API_TOKEN__", self.auth_token or "")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(HTML_DASHBOARD_TEMPLATE.encode("utf-8"))
+            self.wfile.write(html.encode("utf-8"))
 
         elif path == "/api/status" or path == "/api/honeywall":
             snapshot = self.honeywall.get_snapshot()
@@ -329,18 +346,24 @@ class UndahwoarHTTPRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        # INVARIANTE 2: autenticación obligatoria en endpoints que cambian estado
+        token = self.headers.get("X-Auth-Token", "")
+        if not self.auth_token or not secrets.compare_digest(token, self.auth_token):
+            self._send_json({"error": "No autorizado"}, status_code=401)
+            return
+
         if path == "/api/isolate":
             ip = payload.get("ip")
             reason = payload.get("reason", "Aislamiento manual API")
-            if ip:
+            if ip and self._valid_ip(ip):
                 self.honeywall.isolate_ip(ip, reason=reason)
                 self._send_json({"status": "success", "isolated_ip": ip})
             else:
-                self._send_json({"error": "Falta parámetro 'ip'"}, status_code=400)
+                self._send_json({"error": "IP ausente o inválida"}, status_code=400)
 
         elif path == "/api/unblock":
             ip = payload.get("ip")
-            if ip:
+            if ip and self._valid_ip(ip):
                 unblocked = self.honeywall.unblock_ip(ip)
                 self._send_json({"status": "success", "unblocked": unblocked, "ip": ip})
             else:
@@ -354,7 +377,6 @@ class UndahwoarHTTPRequestHandler(BaseHTTPRequestHandler):
         body = json.dumps(data, indent=2).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -362,7 +384,7 @@ class UndahwoarHTTPRequestHandler(BaseHTTPRequestHandler):
 
 class AsyncDashboardServer:
     """Servidor web de telemetría forense para Undahwoar."""
-    def __init__(self, honeywall: UndahwoarHoneywall, forensics: ForensicAlertManager, host: str = "0.0.0.0", port: int = 8888):
+    def __init__(self, honeywall: UndahwoarHoneywall, forensics: ForensicAlertManager, host: str = "127.0.0.1", port: int = 8888):
         self.host = host
         self.port = port
         self.honeywall = honeywall
@@ -374,6 +396,10 @@ class AsyncDashboardServer:
         """Inicia el servidor web en un hilo secundario."""
         UndahwoarHTTPRequestHandler.honeywall = self.honeywall
         UndahwoarHTTPRequestHandler.forensics = self.forensics
+        # INVARIANTE 2: token de control (de env HONEYGATE_API_TOKEN, o uno aleatorio por sesión)
+        self.api_token = os.environ.get("HONEYGATE_API_TOKEN") or secrets.token_urlsafe(16)
+        UndahwoarHTTPRequestHandler.auth_token = self.api_token
+        logger.warning(f"[WEB-API] Token de control (enviar en cabecera X-Auth-Token): {self.api_token}")
 
         self.httpd = HTTPServer((self.host, self.port), UndahwoarHTTPRequestHandler)
         logger.info(f"[WEB-API] Dashboard y Endpoints JSON activos en http://{self.host}:{self.port}")

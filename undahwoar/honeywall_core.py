@@ -18,6 +18,8 @@ from collections import deque
 from typing import Dict, Tuple, Optional, List, Any, Callable
 
 # Configuración de Logging Forense
+# INVARIANTE 7: asegurar logs/ antes de configurar los handlers (evita fallar al importar)
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
