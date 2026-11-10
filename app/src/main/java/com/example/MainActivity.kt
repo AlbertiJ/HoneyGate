@@ -28,7 +28,7 @@ import com.example.ui.screens.BlueTeamReportScreen
 import com.example.ui.screens.ForensicEventsScreen
 import com.example.ui.screens.HoneygateScreen
 import com.example.ui.theme.*
-import com.example.ui.viewmodel.UndahwoarViewModel
+import com.example.ui.viewmodel.HoneyGateViewModel
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
     enableEdgeToEdge()
     setContent {
       MyApplicationTheme {
-        UndahwoarMainApp()
+        HoneyGateMainApp()
       }
     }
   }
@@ -44,7 +44,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
+fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   var selectedTab by remember { mutableIntStateOf(0) }
 
   val tabs = listOf(
@@ -64,7 +64,10 @@ fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
 
   val sessions by viewModel.sessionsList.collectAsStateWithLifecycle()
   val honeygateConfig by viewModel.honeygateConfig.collectAsStateWithLifecycle()
-  val authResult by viewModel.lastAuthResult.collectAsStateWithLifecycle()
+  val mode1Result by viewModel.mode1Result.collectAsStateWithLifecycle()
+  val mode2Result by viewModel.mode2Result.collectAsStateWithLifecycle()
+  val otpChallenge by viewModel.otpChallenge.collectAsStateWithLifecycle()
+  val sqlInjectionResult by viewModel.sqlInjectionResult.collectAsStateWithLifecycle()
   val redTeamLogs by viewModel.redTeamTerminalHistory.collectAsStateWithLifecycle()
   val escalationLevel by viewModel.escalationLevel.collectAsStateWithLifecycle()
 
@@ -99,15 +102,15 @@ fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
             }
             Column {
               Text(
-                text = "UNDAHWOAR HONEYWALL",
+                text = "HONEYGATE",
                 fontWeight = FontWeight.Bold,
                 fontSize = 15.sp,
                 letterSpacing = 1.sp,
                 color = TextPrimary
               )
               Text(
-                text = "Puerta de Miel & Monitoreo Forense (Room Persisted)",
-                fontSize = 11.sp,
+                text = "Portal Cautivo de Decepción & Telemetría Forense",
+                fontSize = 10.sp,
                 color = CyberCyan
               )
             }
@@ -131,7 +134,7 @@ fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
                   .clip(CircleShape)
                   .background(CyberGreen)
               )
-              Text("Room DB", fontSize = 11.sp, color = CyberGreen, fontWeight = FontWeight.SemiBold)
+              Text("Room DB", fontSize = 10.sp, color = CyberGreen, fontWeight = FontWeight.SemiBold)
             }
           }
         }
@@ -141,7 +144,7 @@ fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
       NavigationBar(
         containerColor = DarkSurface,
         contentColor = TextPrimary,
-        tonalElevation = 8.dp,
+        tonalElevation = 6.dp,
         windowInsets = WindowInsets.navigationBars
       ) {
         tabs.forEachIndexed { index, tab ->
@@ -179,30 +182,47 @@ fun UndahwoarMainApp(viewModel: UndahwoarViewModel = viewModel()) {
           normalCount = normalCount,
           onFilterSelected = { viewModel.setFilter(it) },
           onSearchQueryChanged = { viewModel.setSearchQuery(it) },
-          onBlockMac = { viewModel.blockMac(it) },
-          onDeleteEvent = { /* Event deletion */ }
+          onBlockMacConfirmed = { mac, devId -> viewModel.blockMacConfirmed(mac, devId) },
+          onDeleteEvent = { viewModel.clearAllEvents() }
         )
         1 -> HoneygateScreen(
           config = honeygateConfig,
-          authResult = authResult,
+          mode1Result = mode1Result,
+          mode2Result = mode2Result,
+          otpChallenge = otpChallenge,
+          sqlInjectionResult = sqlInjectionResult,
           redTeamLogs = redTeamLogs,
           escalationLevel = escalationLevel,
           onSaveConfig = { viewModel.saveConfig(it) },
-          onSubmitAuth = { ip, mac, email, pass, otp ->
-            viewModel.submitHoneygateAuth(ip, mac, email, pass, otp)
+          onRegisterMode1 = { email, ip, mac ->
+            viewModel.registerMode1(email, ip, mac)
           },
-          onSimulateRedTeamCommand = { cmd, canaryUser ->
-            viewModel.simulateRedTeamCommand(cmd, canaryUser)
+          onRequestOtp = { email, ip, mac ->
+            viewModel.requestOtp(email, ip, mac)
           },
-          onClearAuthResult = { viewModel.clearAuthResult() }
+          onVerifyOtp = { code, ip, mac ->
+            viewModel.verifyOtpAndRegister(code, ip, mac)
+          },
+          onDismissOtp = { viewModel.dismissOtpChallenge() },
+          onTestSqlInjection = { payload, ip, mac ->
+            viewModel.triggerSqlInjectionTest(payload, ip, mac)
+          },
+          onClearSqlInjection = { viewModel.clearSqlInjectionResult() },
+          onRunRedTeamCommand = { user, cmd ->
+            viewModel.runRedTeamCommand(user, cmd)
+          },
+          onClearMode1Result = { viewModel.clearMode1Result() },
+          onUpdateBranding = { name, primary, accent ->
+            viewModel.updateCompanyBranding(name, primary, accent)
+          }
         )
         2 -> AdminSessionsScreen(
           sessions = sessions,
-          onBlockMac = { viewModel.blockMac(it) },
-          onUnblockMac = { viewModel.unblockMac(it) }
+          onBlockMacConfirmed = { mac, devId -> viewModel.blockMacConfirmed(mac, devId) },
+          onUnblockMacConfirmed = { mac, devId -> viewModel.unblockMacConfirmed(mac, devId) }
         )
         3 -> BlueTeamReportScreen(
-          reportText = viewModel.generateBlueTeamReport()
+          reportText = viewModel.generateAuditReport()
         )
       }
     }

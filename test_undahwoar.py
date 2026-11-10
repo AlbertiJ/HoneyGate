@@ -65,8 +65,21 @@ def run_tests():
 
     req_dash = urllib.request.urlopen("http://127.0.0.1:38888/")
     html_content = req_dash.read().decode()
-    assert "Undahwoar Honeywall" in html_content
-    print("       -> Dashboard HTML OK.")
+    assert "HoneyGate" in html_content
+    print("       -> Dashboard HTML OK con branding HoneyGate.")
+
+    # Test POST /api/isolate sin token (debe retornar 401)
+    try:
+        req_bad = urllib.request.Request(
+            "http://127.0.0.1:38888/api/isolate",
+            data=json.dumps({"ip": "10.0.0.1"}).encode(),
+            headers={"Content-Type": "application/json"}
+        )
+        urllib.request.urlopen(req_bad)
+        assert False, "Debe rechazar sin X-Auth-Token"
+    except urllib.error.HTTPError as e:
+        assert e.code == 401, f"Código esperado 401, obtenido {e.code}"
+        print("       -> Endpoint /api/isolate protegido con 401 sin X-Auth-Token: OK")
 
     # Cleanup
     engine.stop()

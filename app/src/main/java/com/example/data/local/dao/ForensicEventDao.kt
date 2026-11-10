@@ -1,28 +1,28 @@
 package com.example.data.local.dao
 
 import androidx.room.*
-import com.example.data.local.entity.ForensicEventEntity
+import com.example.data.local.entity.ForensicEvent
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ForensicEventDao {
   @Query("SELECT * FROM forensic_events ORDER BY timestamp DESC")
-  fun getAllEvents(): Flow<List<ForensicEventEntity>>
+  fun getAllEvents(): Flow<List<ForensicEvent>>
 
-  @Query("SELECT * FROM forensic_events WHERE status = :status ORDER BY timestamp DESC")
-  fun getEventsByStatus(status: String): Flow<List<ForensicEventEntity>>
+  @Query("SELECT * FROM forensic_events WHERE eventType = :eventType ORDER BY timestamp DESC")
+  fun getEventsByType(eventType: String): Flow<List<ForensicEvent>>
 
-  @Query("SELECT * FROM forensic_events WHERE category = :category ORDER BY timestamp DESC")
-  fun getEventsByCategory(category: String): Flow<List<ForensicEventEntity>>
+  @Query("SELECT * FROM forensic_events WHERE deviceId = :deviceId ORDER BY timestamp DESC")
+  fun getEventsByDeviceId(deviceId: String): Flow<List<ForensicEvent>>
 
   @Query("SELECT * FROM forensic_events WHERE macAddress = :mac ORDER BY timestamp DESC")
-  fun getEventsByMac(mac: String): Flow<List<ForensicEventEntity>>
+  fun getEventsByMac(mac: String): Flow<List<ForensicEvent>>
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
-  suspend fun insertEvent(event: ForensicEventEntity): Long
+  suspend fun insertEvent(event: ForensicEvent): Long
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
-  suspend fun insertAll(events: List<ForensicEventEntity>)
+  suspend fun insertAll(events: List<ForensicEvent>)
 
   @Query("DELETE FROM forensic_events WHERE id = :id")
   suspend fun deleteEventById(id: Long)

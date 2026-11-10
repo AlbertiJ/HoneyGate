@@ -28,7 +28,7 @@ logging.basicConfig(
         logging.FileHandler("logs/honeywall.log", mode="a", encoding="utf-8")
     ]
 )
-logger = logging.getLogger("UndahwoarCore")
+logger = logging.getLogger("HoneyGateCore")
 
 
 class HoneywallSecurityException(Exception):

@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Undahwoar"
+rootProject.name = "HoneyGate"
 
 include(":app")

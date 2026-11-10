@@ -1,6 +1,6 @@
 {
-  "name": "Undahwoar",
-  "description": "Framework defensivo de decepción, Honeywall y monitoreo forense para ciberseguridad.",
+  "name": "HoneyGate",
+  "description": "Framework de ciberseguridad defensiva, portal cautivo de decepción y monitoreo forense.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

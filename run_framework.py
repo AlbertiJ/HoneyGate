@@ -17,7 +17,7 @@ from undahwoar.cli_console import InteractiveCLI
 from undahwoar.forensic_monitor import ForensicAlertManager, DesktopNotificationDispatcher
 from undahwoar.dashboard_api import AsyncDashboardServer
 
-logger = logging.getLogger("UndahwoarMain")
+logger = logging.getLogger("HoneyGateMain")
 
 
 def main():
@@ -25,7 +25,7 @@ def main():
     os.makedirs("logs", exist_ok=True)
     os.makedirs("modules", exist_ok=True)
 
-    print("\033[1;36m[+] Iniciando Framework Defensivo Undahwoar (Non-Root User Space)...\033[0m")
+    print("\033[1;36m[+] Iniciando Framework Defensivo HoneyGate (Non-Root User Space)...\033[0m")
 
     # 1. Instanciar Honeywall con callback para notificaciones de alerta inmediata
     def on_honeywall_alert(title: str, message: str, urgency: str):
@@ -44,8 +44,8 @@ def main():
     forensics = ForensicAlertManager(target_log_files=log_targets)
     forensics.start_background()
 
-    # 4. Inicializar Servidor Web y API de Telemetría Asíncrona
-    web_api = AsyncDashboardServer(honeywall=honeywall, forensics=forensics, host="0.0.0.0", port=8888)
+    # 4. Inicializar Servidor Web y API de Telemetría Asíncrona (127.0.0.1 seguro por defecto)
+    web_api = AsyncDashboardServer(honeywall=honeywall, forensics=forensics, host="127.0.0.1", port=8888)
     web_api.start_background()
 
     # Manejador de señales de terminación
