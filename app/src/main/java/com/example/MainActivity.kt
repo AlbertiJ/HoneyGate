@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ui.components.DaemonControlDialog
+import com.example.ui.components.DaemonStatusBadge
 import com.example.ui.screens.AdminSessionsScreen
 import com.example.ui.screens.BlueTeamReportScreen
 import com.example.ui.screens.ForensicEventsScreen
@@ -71,6 +73,11 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   val redTeamLogs by viewModel.redTeamTerminalHistory.collectAsStateWithLifecycle()
   val escalationLevel by viewModel.escalationLevel.collectAsStateWithLifecycle()
 
+  val daemonStatus by viewModel.daemonStatus.collectAsStateWithLifecycle()
+  val isSyncingDaemon by viewModel.isSyncingDaemon.collectAsStateWithLifecycle()
+  val daemonSyncMessage by viewModel.daemonSyncMessage.collectAsStateWithLifecycle()
+  var showDaemonDialog by remember { mutableStateOf(false) }
+
   Scaffold(
     modifier = Modifier.fillMaxSize(),
     containerColor = DarkBackground,
@@ -117,6 +124,12 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
           }
         },
         actions = {
+          DaemonStatusBadge(
+            daemonStatus = daemonStatus,
+            isSyncing = isSyncingDaemon,
+            onClick = { showDaemonDialog = true }
+          )
+          Spacer(modifier = Modifier.width(6.dp))
           Surface(
             shape = RoundedCornerShape(16.dp),
             color = GreenGlow,
@@ -214,7 +227,8 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
           onClearMode1Result = { viewModel.clearMode1Result() },
           onUpdateBranding = { name, primary, accent ->
             viewModel.updateCompanyBranding(name, primary, accent)
-          }
+          },
+          onOpenDaemonSettings = { showDaemonDialog = true }
         )
         2 -> AdminSessionsScreen(
           sessions = sessions,
@@ -226,6 +240,22 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
         )
       }
     }
+  }
+
+  if (showDaemonDialog) {
+    DaemonControlDialog(
+      config = honeygateConfig,
+      daemonStatus = daemonStatus,
+      isSyncing = isSyncingDaemon,
+      syncMessage = daemonSyncMessage,
+      onDismiss = { showDaemonDialog = false },
+      onCheckHealth = { viewModel.checkDaemonHealth() },
+      onSyncData = { viewModel.syncDaemonData() },
+      onUpdateConfig = { url, token, enabled ->
+        viewModel.updateDaemonConfig(url, token, enabled)
+      },
+      onClearSyncMessage = { viewModel.clearDaemonMessage() }
+    )
   }
 }
 

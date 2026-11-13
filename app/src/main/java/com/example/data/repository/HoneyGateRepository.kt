@@ -6,6 +6,10 @@ import com.example.data.local.dao.MonitoredSessionDao
 import com.example.data.local.entity.ForensicEvent
 import com.example.data.local.entity.HoneygateConfigEntity
 import com.example.data.local.entity.MonitoredSessionEntity
+import com.example.data.remote.DaemonAlert
+import com.example.data.remote.DaemonSession
+import com.example.data.remote.DaemonStatus
+import com.example.data.remote.HoneyGateDaemonClient
 import kotlinx.coroutines.flow.Flow
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -17,6 +21,8 @@ class HoneyGateRepository(
   private val sessionDao: MonitoredSessionDao,
   private val configDao: HoneygateConfigDao
 ) {
+  private val daemonClient = HoneyGateDaemonClient()
+
   val allEvents: Flow<List<ForensicEvent>> = eventDao.getAllEvents()
   val allSessions: Flow<List<MonitoredSessionEntity>> = sessionDao.getAllSessions()
   val honeygateConfig: Flow<HoneygateConfigEntity?> = configDao.getConfig()
@@ -56,26 +62,116 @@ class HoneyGateRepository(
 
   /**
    * Bloqueo confirmado por administrador (Invariante 5).
+   * Si el Daemon Linux está configurado y activo, dispara inmediatamente
+   * el aislamiento a nivel de kernel mediante shutdown(fd, SHUT_RDWR).
    */
   suspend fun updateMacBlockStatus(mac: String, deviceId: String, blocked: Boolean) {
     sessionDao.setMacBlockedStatus(mac, blocked)
     if (deviceId.isNotBlank()) {
       sessionDao.setDeviceBlockedStatus(deviceId, blocked)
     }
+
+    val session = sessionDao.getSessionByMac(mac) ?: if (deviceId.isNotBlank()) sessionDao.getSessionByDeviceId(deviceId) else null
+    val targetIp = session?.ipAddress ?: "0.0.0.0"
+
+    // Disparo de contención perimetral remota en el daemon de Linux si está activo
+    val config = configDao.getConfigOnce()
+    var daemonMsg = ""
+    if (config != null && config.daemonSyncEnabled && config.daemonBaseUrl.isNotBlank() && targetIp.isNotBlank() && targetIp != "0.0.0.0") {
+      val token = config.daemonAuthToken.ifBlank { "hg_sec_token_9981" }
+      val remoteResult = if (blocked) {
+        daemonClient.remoteIsolate(config.daemonBaseUrl, token, targetIp, "Bloqueo confirmado por administrador en app HoneyGate para MAC $mac / $deviceId")
+      } else {
+        daemonClient.remoteUnblock(config.daemonBaseUrl, token, targetIp)
+      }
+      daemonMsg = remoteResult.fold(
+        onSuccess = { " [Kernel Linux: $it]" },
+        onFailure = { " [Daemon Linux no alcanzado: ${it.localizedMessage}]" }
+      )
+    }
+
     val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
     eventDao.insertEvent(
       ForensicEvent(
         eventType = if (blocked) "Blocked" else "Alerted",
-        sourceIp = "0.0.0.0",
+        sourceIp = targetIp,
         macAddress = mac,
         deviceId = deviceId,
-        description = "Acción de Administrador confirmada: ${if (blocked) "BLOQUEO EN CASCADA" else "DESBLOQUEO"} aplicado a la MAC $mac y device_id $deviceId.",
+        description = "Acción de Administrador confirmada: ${if (blocked) "BLOQUEO EN CASCADA" else "DESBLOQUEO"} aplicado a la MAC $mac y device_id $deviceId.$daemonMsg",
         category = "ADMIN_CONTAINMENT",
         severity = if (blocked) "CRITICAL" else "MEDIUM",
         mitreTechnique = "T1562 - Impair Defenses (Mitigación Defensiva)",
         dateFormatted = now
       )
     )
+  }
+
+  /**
+   * Consulta el estado en vivo del Daemon de HoneyGate en Linux (GET /api/status).
+   */
+  suspend fun checkDaemonHealth(baseUrl: String): DaemonStatus {
+    return daemonClient.checkHealth(baseUrl)
+  }
+
+  /**
+   * Sincroniza la telemetría en vivo del Daemon Linux con la base de datos Room:
+   * - Ingesta sesiones activas de kernel (GET /api/connections).
+   * - Ingesta alertas forenses de inotify y honeypot (GET /api/alerts).
+   */
+  suspend fun syncWithDaemon(baseUrl: String, token: String): Result<String> {
+    val sessionsResult = daemonClient.getActiveSessions(baseUrl)
+    val alertsResult = daemonClient.getAlerts(baseUrl)
+
+    var sessionsIngested = 0
+    var alertsIngested = 0
+
+    sessionsResult.onSuccess { sessions ->
+      sessions.forEach { s ->
+        val devId = calculateCompositeDeviceId(s.mac)
+        val existing = sessionDao.getSessionByDeviceId(devId) ?: sessionDao.getSessionByMac(s.mac)
+        val entity = (existing ?: MonitoredSessionEntity(deviceId = devId, macAddress = s.mac, ipAddress = s.ip)).copy(
+          deviceId = devId,
+          macAddress = s.mac,
+          ipAddress = s.ip,
+          durationSeconds = s.durationSec,
+          outboundRequestsCount = s.outboundRateMin,
+          lastActivity = System.currentTimeMillis()
+        )
+        sessionDao.insertOrUpdate(entity)
+        sessionsIngested++
+      }
+    }
+
+    alertsResult.onSuccess { alerts ->
+      val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+      alerts.forEach { a ->
+        eventDao.insertEvent(
+          ForensicEvent(
+            eventType = when (a.severity.lowercase()) {
+              "blocked", "critical" -> "Blocked"
+              "alerted", "high", "medium" -> "Alerted"
+              else -> "Normal"
+            },
+            sourceIp = "127.0.0.1",
+            macAddress = "00:00:00:00:00:00",
+            deviceId = "dev_daemon_sync",
+            description = "[Daemon Linux] ${a.title}: ${a.message}",
+            category = "DAEMON_SYNC_ALERT",
+            severity = a.severity.uppercase(),
+            mitreTechnique = "T1046 - Network Service Discovery",
+            dateFormatted = if (a.date.isNotBlank()) a.date else now,
+            isCorrelated = true
+          )
+        )
+        alertsIngested++
+      }
+    }
+
+    return if (sessionsResult.isSuccess || alertsResult.isSuccess) {
+      Result.success("Telemetría sincronizada: $sessionsIngested sesiones activas y $alertsIngested alertas forenses.")
+    } else {
+      Result.failure(sessionsResult.exceptionOrNull() ?: alertsResult.exceptionOrNull() ?: Exception("Fallo en sincronización con Daemon"))
+    }
   }
 
   /**

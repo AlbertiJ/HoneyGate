@@ -466,6 +466,7 @@ class AsyncDashboardServer:
         HoneyGateHTTPRequestHandler.forensics = self.forensics
         HoneyGateHTTPRequestHandler.auth_token = self.api_token
 
+        HTTPServer.allow_reuse_address = True
         self.httpd = HTTPServer((self.host, self.port), HoneyGateHTTPRequestHandler)
         logger.info(f"[WEB-API] Dashboard y Endpoints JSON activos en http://{self.host}:{self.port}")
 

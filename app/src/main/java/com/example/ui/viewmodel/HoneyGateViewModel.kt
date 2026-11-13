@@ -7,6 +7,7 @@ import com.example.data.local.HoneyGateDatabase
 import com.example.data.local.entity.ForensicEvent
 import com.example.data.local.entity.HoneygateConfigEntity
 import com.example.data.local.entity.MonitoredSessionEntity
+import com.example.data.remote.DaemonStatus
 import com.example.data.repository.HoneyGateRepository
 import com.example.data.repository.Mode1AuthResult
 import com.example.data.repository.Mode2ActionResult
@@ -93,6 +94,16 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
   private val _escalationLevel = MutableStateFlow("Nivel 1: Acceso Inicial Canary")
   val escalationLevel: StateFlow<String> = _escalationLevel.asStateFlow()
 
+  // MÓDULO 1: Estado Live del Daemon Linux (Kali/WSL2)
+  private val _daemonStatus = MutableStateFlow<DaemonStatus?>(null)
+  val daemonStatus: StateFlow<DaemonStatus?> = _daemonStatus.asStateFlow()
+
+  private val _isSyncingDaemon = MutableStateFlow(false)
+  val isSyncingDaemon: StateFlow<Boolean> = _isSyncingDaemon.asStateFlow()
+
+  private val _daemonSyncMessage = MutableStateFlow<String?>(null)
+  val daemonSyncMessage: StateFlow<String?> = _daemonSyncMessage.asStateFlow()
+
   // Contadores reactivos
   val blockedCount: StateFlow<Int> = rawEvents.map { it.count { e -> e.eventType == "Blocked" } }
     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
@@ -104,7 +115,53 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
   init {
     viewModelScope.launch {
       repository.preseedInitialDataIfEmpty()
+      checkDaemonHealth()
     }
+  }
+
+  fun checkDaemonHealth() {
+    viewModelScope.launch {
+      val config = honeygateConfig.value
+      val baseUrl = config.daemonBaseUrl.ifBlank { "http://10.0.2.2:8888" }
+      val status = repository.checkDaemonHealth(baseUrl)
+      _daemonStatus.value = status
+    }
+  }
+
+  fun syncDaemonData() {
+    viewModelScope.launch {
+      _isSyncingDaemon.value = true
+      val config = honeygateConfig.value
+      val baseUrl = config.daemonBaseUrl.ifBlank { "http://10.0.2.2:8888" }
+      val token = config.daemonAuthToken.ifBlank { "hg_sec_token_9981" }
+      val result = repository.syncWithDaemon(baseUrl, token)
+      _isSyncingDaemon.value = false
+      _daemonSyncMessage.value = result.fold(
+        onSuccess = { it },
+        onFailure = { "Error de sincronización: ${it.localizedMessage}" }
+      )
+      // Actualizamos estado de salud tras el sync
+      val updatedStatus = repository.checkDaemonHealth(baseUrl)
+      _daemonStatus.value = updatedStatus
+    }
+  }
+
+  fun updateDaemonConfig(baseUrl: String, token: String, enabled: Boolean) {
+    viewModelScope.launch {
+      val current = honeygateConfig.value
+      val updated = current.copy(
+        daemonBaseUrl = baseUrl,
+        daemonAuthToken = token,
+        daemonSyncEnabled = enabled
+      )
+      repository.saveHoneygateConfig(updated)
+      val status = repository.checkDaemonHealth(baseUrl)
+      _daemonStatus.value = status
+    }
+  }
+
+  fun clearDaemonMessage() {
+    _daemonSyncMessage.value = null
   }
 
   fun setFilter(filter: String) {

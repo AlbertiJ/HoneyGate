@@ -41,5 +41,10 @@ data class HoneygateConfigEntity(
   // MODO 3: Mixto
   val maxAllowedConnections: Int = 50,
   val activePortsAuditedCsv: String = "80, 443, 2222, 3306, 8080",
-  val networkScannerActive: Boolean = true
+  val networkScannerActive: Boolean = true,
+
+  // Conector Live Daemon Linux (Módulo 1)
+  val daemonBaseUrl: String = "http://10.0.2.2:8888",
+  val daemonAuthToken: String = "hg_sec_token_9981",
+  val daemonSyncEnabled: Boolean = true
 )

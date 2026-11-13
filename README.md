@@ -110,6 +110,42 @@ El núcleo de red corre en espacio de usuario en Kali Linux o WSL2:
 
 ---
 
+## 🔌 Módulo 1 — Conector Live App Android & Daemon Linux (Control Perimetral Remoto)
+
+El **Módulo 1** establece el puente de comando, telemetría y control perimetral bidireccional en tiempo real entre la aplicación Android y el Daemon de HoneyGate corriendo en Linux (Kali, WSL2 o servidor remoto):
+
+```
+┌─────────────────────────────────┐                 ┌───────────────────────────────────┐
+│     HONEYGATE ANDROID APP       │                 │      HONEYGATE LINUX DAEMON       │
+│                                 │                 │    (Python 3.11 epoll + ctypes)   │
+│  [TopAppBar Status Badge]       │   HTTP REST     │                                   │
+│  [DaemonControlDialog]          │ ──────────────> │  GET  /api/status                 │
+│  * Latencia de red              │   (Header:      │  GET  /api/connections           │
+│  * Sockets activos en kernel    │    X-Auth-Token)│  GET  /api/alerts                 │
+│  * Ingesta a Room Database      │ <────────────── │                                   │
+│                                 │                 │                                   │
+│  [Acción de Bloqueo Invariante 5]                 │  POST /api/isolate                │
+│  "Aislar IP confirmada"         │ ──────────────> │  -> shutdown(fd, SHUT_RDWR)       │
+│                                 │                 │  -> /proc/net/arp MAC correlation │
+│  "Desbloquear IP"               │ ──────────────> │  POST /api/unblock                │
+└─────────────────────────────────┘                 └───────────────────────────────────┘
+```
+
+### Características Clave del Módulo 1:
+1. **Comprobación de Salud y Latencia (`GET /api/status`)**:
+   * Reporta en vivo el estado del servicio, latencia en milisegundos, conteo de sockets de red activos, total de conexiones atendidas, violaciones de tasa de salida (*rate-limit*) e IPs actualmente aisladas.
+2. **Sincronización de Telemetría a Room (`GET /api/connections` y `GET /api/alerts`)**:
+   * Las sesiones activas en el bucle epoll son ingestadas directamente a `MonitoredSessionEntity` con cálculo dinámico del `device_id` compuesto.
+   * Las alertas forenses de kernel (*inotify*) se almacenan automáticamente en `ForensicEvent` para correlación defensiva y generación de reportes.
+3. **Mitigación Perimetral Remota a Nivel de Kernel (`POST /api/isolate` / `POST /api/unblock`)**:
+   * Al confirmar un bloqueo en el panel Android (cumpliendo el **Invariante 5**), se despacha una orden autenticada con `X-Auth-Token`.
+   * El Daemon en Linux localiza el descriptor de socket (`fd`) asociado y ejecuta inmediatamente la llamada al sistema nativa `shutdown(socket_fd, SHUT_RDWR)`, cerrando físicamente la conexión del atacante.
+4. **Configuración Dinámica y Tolerancia de Red**:
+   * Endpoint configurable desde la app: por defecto `http://10.0.2.2:8888` en emulador Android o la IP local/LAN del host Kali (`http://192.168.1.X:8888`).
+   * Permisos de red declarados (`INTERNET`, `ACCESS_NETWORK_STATE`, `usesCleartextTraffic="true"`).
+
+---
+
 ## 📁 Estructura del Repositorio
 
 ```text
@@ -201,8 +237,9 @@ git reset --hard v1.0.0-checkpoint
 ### 4. Sincronización con GitHub (Push)
 Para publicar este lanzamiento y sus etiquetas de restauración en tu repositorio de GitHub:
 ```bash
-# 1. Configurar la URL de tu repositorio remoto:
-git remote add origin https://github.com/<TU_USUARIO>/<TU_REPOSITORIO>.git
+# 1. Verificar el remoto configurado:
+git remote -v
+# (origin está configurado apuntando a https://github.com/AlbertiJ/HoneyGate.git)
 
 # 2. Subir la rama main y los tags de checkpoint:
 git push -u origin main --tags

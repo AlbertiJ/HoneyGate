@@ -48,7 +48,8 @@ fun HoneygateScreen(
   onClearSqlInjection: () -> Unit,
   onRunRedTeamCommand: (canaryUser: String, command: String) -> Unit,
   onClearMode1Result: () -> Unit,
-  onUpdateBranding: (name: String, primary: String, accent: String) -> Unit
+  onUpdateBranding: (name: String, primary: String, accent: String) -> Unit,
+  onOpenDaemonSettings: () -> Unit = {}
 ) {
   var selectedGateMode by remember { mutableIntStateOf(config.gateMode) }
 
@@ -135,7 +136,8 @@ fun HoneygateScreen(
       3 -> Mode3MixedScenarioScreen(
         config = config,
         redTeamLogs = redTeamLogs,
-        onSaveConfig = onSaveConfig
+        onSaveConfig = onSaveConfig,
+        onOpenDaemonSettings = onOpenDaemonSettings
       )
     }
   }
@@ -804,7 +806,8 @@ fun ServiceMiniTag(title: String, modifier: Modifier = Modifier) {
 fun Mode3MixedScenarioScreen(
   config: HoneygateConfigEntity,
   redTeamLogs: List<String>,
-  onSaveConfig: (HoneygateConfigEntity) -> Unit
+  onSaveConfig: (HoneygateConfigEntity) -> Unit,
+  onOpenDaemonSettings: () -> Unit = {}
 ) {
   var maxConns by remember { mutableIntStateOf(config.maxAllowedConnections) }
   var portalActive by remember { mutableStateOf(config.portalBrandingActive) }
@@ -825,6 +828,54 @@ fun Mode3MixedScenarioScreen(
         Column(modifier = Modifier.padding(10.dp)) {
           Text("Modo 3: Mixto (Portal Cautivo + Honeypot Unificado)", fontWeight = FontWeight.Bold, color = CyberCyan, fontSize = 12.sp)
           Text("Tráfico legítimo con salida a internet bajo metadatos (Ley 25.326/26.388) coexistiendo con trampa señuelo.", fontSize = 10.sp, color = TextSecondary)
+        }
+      }
+    }
+
+    item {
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen.copy(alpha = 0.4f))
+      ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+              Icon(Icons.Default.Terminal, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(20.dp))
+              Text("Módulo 1: Daemon Linux (Control Perimetral)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 12.sp)
+            }
+            Text(
+              text = if (config.daemonSyncEnabled) "CONECTOR ACTIVO" else "MODO LOCAL",
+              fontSize = 9.sp,
+              color = if (config.daemonSyncEnabled) CyberGreen else TextMuted,
+              fontWeight = FontWeight.Bold
+            )
+          }
+
+          Spacer(modifier = Modifier.height(6.dp))
+          Text("Endpoint: ${config.daemonBaseUrl}", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = CyberCyan)
+          Text("Autenticación: X-Auth-Token activo | Aislamiento kernel vía shutdown()", fontSize = 10.sp, color = TextSecondary)
+
+          Spacer(modifier = Modifier.height(8.dp))
+          OutlinedButton(
+            onClick = onOpenDaemonSettings,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = CyberCyan),
+            border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan)
+          ) {
+            Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Configurar y Sincronizar Daemon Linux", fontSize = 11.sp)
+          }
         }
       }
     }
