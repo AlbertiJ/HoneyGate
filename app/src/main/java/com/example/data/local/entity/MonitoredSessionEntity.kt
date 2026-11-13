@@ -4,36 +4,37 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /**
- * Esquema unificado de sesión de HoneyGate.
- * Invariante 1: Identificación mediante Fingerprint Compuesto (device_id) =
- * MAC-por-SSID + Fingerprint de Navegador + Network/JA3 + DHCP fingerprint.
- * Invariante 2: Contención de salida (whitelist / sinkhole).
- * Invariante 4: Consentimiento explícito de metadatos (Ley 25.326 y Ley 26.388).
+ * Caché local en Room de las sesiones devueltas por GET /api/sessions del daemon HoneyGate.
+ * Mapea los bloques origin, target y session sin valores ficticios prefabricados.
  */
 @Entity(tableName = "monitored_sessions")
 data class MonitoredSessionEntity(
   @PrimaryKey(autoGenerate = true)
   val id: Long = 0,
-  val deviceId: String, // Fingerprint compuesto inmutable
-  val macAddress: String,
-  val ipAddress: String,
-  val deviceType: String = "Mobile / Chrome OS",
-  val browserFingerprint: String = "Canvas_A9F1_JA3_771",
-  val dhcpFingerprint: String = "Option55_1,15,3,6_VendorAndroid",
-  val ja3Fingerprint: String = "771,4865-4866-4867,0-23-65281-10-11,29-23-24,0",
-  val connectedAt: Long = System.currentTimeMillis(),
-  val lastActivity: Long = System.currentTimeMillis(),
-  val durationSeconds: Long = 0,
-  val dhcpLeaseSeconds: Int = 3600,
-  val emailsUsedCsv: String = "", // Emails registrados por este device_id
-  val failedLoginAttempts: Int = 0,
-  val isEmailDisabled: Boolean = false,
+  val daemonSessionId: Long? = null,
+  val mode: Int = 1,
+  val deviceId: String = "",
+  val macAddress: String = "",
+  val ipAddress: String = "",
+  val clientPort: Int = 0,
+  val deviceType: String = "",
+  val browserFingerprint: String = "",
+  val networkFingerprint: String = "",
+  val dhcpFingerprint: String = "",
+  val destIp: String = "",
+  val destPort: Int = 0,
+  val service: String = "",
+  val honeytokenTouched: String? = null,
+  val connectedAt: Long = 0L,
+  val endedAt: Long? = null,
+  val lastActivity: Long = 0L,
+  val durationSeconds: Long = 0L,
+  val bytesIn: Long = 0L,
+  val bytesOut: Long = 0L,
+  val visitorLabel: String = "",
+  val observedReason: String = "",
   val isMacBlocked: Boolean = false,
-  val isInObservation: Boolean = false, // Anti-Sybil: en observación (baja lease y BW)
-  val outboundRequestsCount: Int = 0,
-  val visitedUrlsCsv: String = "",
-  val destinationWhitelisted: Boolean = false,
-  val consentAccepted: Boolean = true, // Ley 25.326 AR
-  val detectedAnomaliesCsv: String = "",
-  val currentStatus: String = "Normal" // "Normal", "Alerted", "Blocked"
+  val isInObservation: Boolean = false,
+  val currentStatus: String = "active", // "active", "closed", "isolated", "en_observacion"
+  val isDemo: Boolean = false
 )

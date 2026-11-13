@@ -27,6 +27,10 @@ interface ForensicEventDao {
   @Query("DELETE FROM forensic_events WHERE id = :id")
   suspend fun deleteEventById(id: Long)
 
+  @Query("DELETE FROM forensic_events WHERE isDemo = :isDemo")
+  suspend fun clearByDemoFlag(isDemo: Boolean)
+
   @Query("DELETE FROM forensic_events")
   suspend fun clearAll()
 }
+

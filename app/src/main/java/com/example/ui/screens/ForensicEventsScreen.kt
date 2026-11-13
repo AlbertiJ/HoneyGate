@@ -1,8 +1,6 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,20 +35,21 @@ fun ForensicEventsScreen(
   blockedCount: Int,
   alertedCount: Int,
   normalCount: Int,
+  isOnline: Boolean,
   onFilterSelected: (String) -> Unit,
   onSearchQueryChanged: (String) -> Unit,
-  onBlockMacConfirmed: (String, String) -> Unit,
-  onDeleteEvent: (Long) -> Unit
+  onIsolateIpConfirmed: (String, String) -> Unit,
+  onDeleteEvent: (Long) -> Unit,
+  onRefreshFromDaemon: () -> Unit
 ) {
   var selectedEventForDetail by remember { mutableStateOf<ForensicEvent?>(null) }
-  var pendingBlockMacTarget by remember { mutableStateOf<Pair<String, String>?>(null) } // mac to deviceId
+  var pendingIsolateTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
 
   Column(
     modifier = Modifier
       .fillMaxSize()
       .padding(horizontal = 14.dp, vertical = 8.dp)
   ) {
-    // 1. Tarjetas de Métricas de Estados Forenses (Colores calmados para confort visual)
     Row(
       modifier = Modifier
         .fillMaxWidth()
@@ -83,7 +82,6 @@ fun ForensicEventsScreen(
       )
     }
 
-    // Barra Táctica de Distribución de Eventos (Eye-Care UX)
     val totalCount = blockedCount + alertedCount + normalCount
     if (totalCount > 0) {
       val blockedRatio = blockedCount.toFloat() / totalCount
@@ -97,13 +95,13 @@ fun ForensicEventsScreen(
           verticalAlignment = Alignment.CenterVertically
         ) {
           Text(
-            "Distribución Táctica de Amenazas ($totalCount eventos)",
+            "Distribución de Eventos ($totalCount)",
             fontSize = 10.sp,
             color = TextSecondary,
             fontWeight = FontWeight.SemiBold
           )
           Text(
-            "${(blockedRatio * 100).toInt()}% Blocked | ${(alertedRatio * 100).toInt()}% Alerted | ${(normalRatio * 100).toInt()}% Normal",
+            "${(blockedRatio * 100).toInt()}% Crít | ${(alertedRatio * 100).toInt()}% Alerta | ${(normalRatio * 100).toInt()}% Info",
             fontSize = 10.sp,
             color = CyberCyan,
             fontFamily = FontFamily.Monospace
@@ -118,73 +116,73 @@ fun ForensicEventsScreen(
             .background(DarkSurfaceVariant)
         ) {
           if (blockedRatio > 0f) {
-            Box(
-              modifier = Modifier
-                .weight(blockedRatio.coerceAtLeast(0.01f))
-                .fillMaxHeight()
-                .background(AlertRed)
-            )
+            Box(modifier = Modifier.weight(blockedRatio.coerceAtLeast(0.01f)).fillMaxHeight().background(AlertRed))
           }
           if (alertedRatio > 0f) {
-            Box(
-              modifier = Modifier
-                .weight(alertedRatio.coerceAtLeast(0.01f))
-                .fillMaxHeight()
-                .background(WarningAmber)
-            )
+            Box(modifier = Modifier.weight(alertedRatio.coerceAtLeast(0.01f)).fillMaxHeight().background(WarningAmber))
           }
           if (normalRatio > 0f) {
-            Box(
-              modifier = Modifier
-                .weight(normalRatio.coerceAtLeast(0.01f))
-                .fillMaxHeight()
-                .background(CyberGreen)
-            )
+            Box(modifier = Modifier.weight(normalRatio.coerceAtLeast(0.01f)).fillMaxHeight().background(CyberGreen))
           }
         }
       }
     }
 
-    // 2. Barra de Búsqueda Intuitiva
-    OutlinedTextField(
-      value = searchQuery,
-      onValueChange = onSearchQueryChanged,
-      modifier = Modifier
-        .fillMaxWidth()
-        .testTag("search_forensic_events"),
-      placeholder = { Text("Buscar por IP, MAC, device_id o técnica MITRE...", fontSize = 12.sp, color = TextMuted) },
-      leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(20.dp)) },
-      trailingIcon = {
-        if (searchQuery.isNotEmpty()) {
-          IconButton(onClick = { onSearchQueryChanged("") }) {
-            Icon(Icons.Default.Close, contentDescription = "Limpiar", tint = TextSecondary, modifier = Modifier.size(18.dp))
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      OutlinedTextField(
+        value = searchQuery,
+        onValueChange = onSearchQueryChanged,
+        modifier = Modifier
+          .weight(1f)
+          .testTag("search_forensic_events"),
+        placeholder = { Text("Buscar IP, device_id, event_type o MITRE...", fontSize = 12.sp, color = TextMuted) },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(20.dp)) },
+        trailingIcon = {
+          if (searchQuery.isNotEmpty()) {
+            IconButton(onClick = { onSearchQueryChanged("") }) {
+              Icon(Icons.Default.Close, contentDescription = "Limpiar", tint = TextSecondary, modifier = Modifier.size(18.dp))
+            }
           }
-        }
-      },
-      singleLine = true,
-      textStyle = androidx.compose.ui.text.TextStyle(color = TextPrimary, fontSize = 13.sp),
-      colors = OutlinedTextFieldDefaults.colors(
-        focusedContainerColor = DarkSurface,
-        unfocusedContainerColor = DarkSurface,
-        focusedBorderColor = CyberCyan,
-        unfocusedBorderColor = DarkBorder
-      ),
-      shape = RoundedCornerShape(10.dp)
-    )
+        },
+        singleLine = true,
+        textStyle = androidx.compose.ui.text.TextStyle(color = TextPrimary, fontSize = 13.sp),
+        colors = OutlinedTextFieldDefaults.colors(
+          focusedContainerColor = DarkSurface,
+          unfocusedContainerColor = DarkSurface,
+          focusedBorderColor = CyberCyan,
+          unfocusedBorderColor = DarkBorder
+        ),
+        shape = RoundedCornerShape(10.dp)
+      )
+
+      IconButton(
+        onClick = onRefreshFromDaemon,
+        modifier = Modifier
+          .size(48.dp)
+          .clip(RoundedCornerShape(10.dp))
+          .background(DarkSurface)
+          .testTag("refresh_events_button")
+      ) {
+        Icon(Icons.Default.Refresh, contentDescription = "Actualizar eventos del daemon", tint = CyberCyan)
+      }
+    }
 
     Spacer(modifier = Modifier.height(10.dp))
 
-    // 3. Fila de Filtros (Chips) para alternar entre 'Blocked', 'Alerted', y 'Normal'
     LazyRow(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.CenterVertically
     ) {
       val filterOptions = listOf(
-        "All" to "Todos los Eventos",
-        "Blocked" to "Blocked (Contención)",
-        "Alerted" to "Alerted (Observación)",
-        "Normal" to "Normal (Nominal)"
+        "All" to "Todos",
+        "Blocked" to "Críticos / Bloqueo",
+        "Alerted" to "Advertencias",
+        "Normal" to "Informativos"
       )
 
       items(filterOptions) { (key, label) ->
@@ -220,7 +218,6 @@ fun ForensicEventsScreen(
 
     Spacer(modifier = Modifier.height(8.dp))
 
-    // 4. LazyColumn con el listado de eventos forenses
     if (events.isEmpty()) {
       Box(
         modifier = Modifier
@@ -229,10 +226,23 @@ fun ForensicEventsScreen(
         contentAlignment = Alignment.Center
       ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Icon(Icons.Default.FilterListOff, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
+          Icon(
+            imageVector = if (isOnline) Icons.Default.VerifiedUser else Icons.Default.CloudOff,
+            contentDescription = null,
+            tint = TextMuted,
+            modifier = Modifier.size(44.dp)
+          )
           Spacer(modifier = Modifier.height(10.dp))
-          Text("No hay eventos forenses para el filtro seleccionado", color = TextSecondary, fontSize = 13.sp)
-          Text("Modifica el filtro superior o genera actividad desde HoneyGate", color = TextMuted, fontSize = 11.sp)
+          Text(
+            text = if (isOnline) "Sin eventos en el daemon" else "Sin conexión — caché de eventos vacía",
+            color = TextSecondary,
+            fontSize = 13.sp
+          )
+          Text(
+            text = "Conectá el daemon y sincronizá desde GET /api/events para ver telemetría real.",
+            color = TextMuted,
+            fontSize = 11.sp
+          )
         }
       }
     } else {
@@ -245,7 +255,7 @@ fun ForensicEventsScreen(
           ForensicEventItem(
             event = event,
             onClick = { selectedEventForDetail = event },
-            onPromptBlock = { pendingBlockMacTarget = event.macAddress to event.deviceId },
+            onPromptIsolate = { pendingIsolateTarget = event.sourceIp to event.deviceId },
             onDelete = { onDeleteEvent(event.id) }
           )
         }
@@ -253,10 +263,9 @@ fun ForensicEventsScreen(
     }
   }
 
-  // Invariante 5: Diálogo de Confirmación Obligatorio para Acciones Destructivas / Bloqueo
-  pendingBlockMacTarget?.let { (mac, devId) ->
+  pendingIsolateTarget?.let { (ip, devId) ->
     AlertDialog(
-      onDismissRequest = { pendingBlockMacTarget = null },
+      onDismissRequest = { pendingIsolateTarget = null },
       containerColor = DarkSurface,
       titleContentColor = AlertRed,
       textContentColor = TextSecondary,
@@ -264,7 +273,7 @@ fun ForensicEventsScreen(
       title = { Text("Confirmación Requerida (Invariante 5)", fontSize = 14.sp, fontWeight = FontWeight.Bold) },
       text = {
         Text(
-          "¿Confirmas el aislamiento y bloqueo en cascada para la dirección MAC $mac y el device_id $devId? Esta acción suspenderá inmediatamente todo tráfico y revocará credenciales asociadas.",
+          "¿Confirmas aislar la IP $ip (device_id: ${devId.ifBlank { "sin device_id" }}) en el daemon mediante POST /api/isolate?",
           fontSize = 12.sp,
           color = TextPrimary,
           lineHeight = 16.sp
@@ -273,23 +282,22 @@ fun ForensicEventsScreen(
       confirmButton = {
         Button(
           onClick = {
-            onBlockMacConfirmed(mac, devId)
-            pendingBlockMacTarget = null
+            onIsolateIpConfirmed(ip, devId)
+            pendingIsolateTarget = null
           },
           colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
         ) {
-          Text("Confirmar Bloqueo", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          Text("Confirmar Aislamiento", fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
       },
       dismissButton = {
-        TextButton(onClick = { pendingBlockMacTarget = null }) {
+        TextButton(onClick = { pendingIsolateTarget = null }) {
           Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
         }
       }
     )
   }
 
-  // Modal de Detalle Forense Completo
   selectedEventForDetail?.let { event ->
     AlertDialog(
       onDismissRequest = { selectedEventForDetail = null },
@@ -298,38 +306,47 @@ fun ForensicEventsScreen(
       textContentColor = TextSecondary,
       title = {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          StatusBadge(status = event.eventType)
-          Text(event.category, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+          StatusBadge(status = event.eventType, severity = event.severity)
+          Text(event.rawEventType.ifBlank { event.category }, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
         }
       },
       text = {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
           Text("Descripción:", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = TextPrimary)
           Text(event.description, fontSize = 11.sp, color = TextSecondary, lineHeight = 15.sp)
-          
+
           Divider(color = DarkBorder, modifier = Modifier.padding(vertical = 4.dp))
-          
-          Text("Identificadores (Invariante 1 - Fingerprint Compuesto):", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = CyberCyan)
-          Text("• device_id: ${event.deviceId.ifEmpty { "dev_composite_unregistered" }}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
-          Text("• IP Origen: ${event.sourceIp}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
-          Text("• MAC Origen: ${event.macAddress}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
-          Text("• MITRE ATT&CK: ${event.mitreTechnique}", fontSize = 10.sp, color = WarningAmber)
-          
+
+          Text("Campos del Evento (/api/events):", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = CyberCyan)
+          event.daemonEventId?.let { Text("• id: $it | modo: ${event.mode}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary) }
+          event.sessionId?.let { Text("• session_id: $it", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary) }
+          if (event.deviceId.isNotBlank()) {
+            Text("• device_id: ${event.deviceId}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+          }
+          if (event.sourceIp.isNotBlank()) {
+            Text("• ip: ${event.sourceIp}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+          }
+          if (event.macAddress.isNotBlank()) {
+            Text("• mac: ${event.macAddress}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+          }
+          if (event.mitreTechnique.isNotBlank()) {
+            Text("• mitre_technique: ${event.mitreTechnique}", fontSize = 10.sp, color = WarningAmber)
+          }
           event.honeytokenTouched?.let {
-            Text("• Honeytoken Tocado: $it", fontSize = 10.sp, color = AlertRed, fontWeight = FontWeight.Bold)
+            Text("• honeytoken_touched: $it", fontSize = 10.sp, color = AlertRed, fontWeight = FontWeight.Bold)
           }
         }
       },
       confirmButton = {
-        if (event.eventType != "Blocked") {
+        if (event.sourceIp.isNotBlank() && event.eventType != "Blocked") {
           Button(
             onClick = {
-              pendingBlockMacTarget = event.macAddress to event.deviceId
+              pendingIsolateTarget = event.sourceIp to event.deviceId
               selectedEventForDetail = null
             },
             colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
           ) {
-            Text("Bloquear con Confirmación", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text("Aislar IP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
           }
         }
       },
@@ -379,13 +396,13 @@ fun StatusMetricCard(
 fun ForensicEventItem(
   event: ForensicEvent,
   onClick: () -> Unit,
-  onPromptBlock: () -> Unit,
+  onPromptIsolate: () -> Unit,
   onDelete: () -> Unit
 ) {
-  val (borderColor, _) = when (event.eventType) {
-    "Blocked" -> AlertRed to RedGlow
-    "Alerted" -> WarningAmber to AmberGlow
-    else -> CyberGreen to GreenGlow
+  val borderColor = when (event.eventType) {
+    "Blocked" -> AlertRed
+    "Alerted" -> WarningAmber
+    else -> CyberGreen
   }
 
   val dateStr = if (event.dateFormatted.isNotBlank()) {
@@ -409,16 +426,22 @@ fun ForensicEventItem(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
       ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-          StatusBadge(status = event.eventType)
-          Text(event.category, fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 12.sp)
-          if (event.isCorrelated) {
-            Surface(
-              shape = RoundedCornerShape(4.dp),
-              color = CyanGlow,
-              border = androidx.compose.foundation.BorderStroke(0.5.dp, CyberCyan)
-            ) {
-              Text("CORRELACIONADO", color = CyberCyan, fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.weight(1f)
+        ) {
+          StatusBadge(status = event.eventType, severity = event.severity)
+          Text(
+            text = event.rawEventType.ifBlank { event.category },
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            fontSize = 11.sp,
+            maxLines = 1
+          )
+          if (event.isDemo) {
+            Surface(shape = RoundedCornerShape(4.dp), color = AmberGlow) {
+              Text("DEMO", color = WarningAmber, fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
             }
           }
         }
@@ -436,32 +459,38 @@ fun ForensicEventItem(
       ) {
         Column(modifier = Modifier.weight(1f)) {
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("IP: ${event.sourceIp}", fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
-            Text("MAC: ${event.macAddress}", fontSize = 10.sp, color = TextMuted, fontFamily = FontFamily.Monospace)
+            if (event.sourceIp.isNotBlank()) {
+              Text("IP: ${event.sourceIp}", fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
+            }
+            if (event.macAddress.isNotBlank()) {
+              Text("MAC: ${event.macAddress}", fontSize = 10.sp, color = TextMuted, fontFamily = FontFamily.Monospace)
+            }
           }
           if (event.deviceId.isNotBlank()) {
             Text("device_id: ${event.deviceId}", fontSize = 9.sp, color = TextMuted, fontFamily = FontFamily.Monospace)
           }
-          Text(event.mitreTechnique, fontSize = 9.sp, color = WarningAmber)
+          if (event.mitreTechnique.isNotBlank()) {
+            Text("MITRE: ${event.mitreTechnique}", fontSize = 9.sp, color = WarningAmber)
+          }
           event.honeytokenTouched?.let {
-            Text("⚠️ Honeytoken: $it", fontSize = 9.sp, color = AlertRed, fontWeight = FontWeight.Bold)
+            Text("Honeytoken: $it", fontSize = 9.sp, color = AlertRed, fontWeight = FontWeight.Bold)
           }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-          if (event.eventType != "Blocked") {
+          if (event.sourceIp.isNotBlank() && event.eventType != "Blocked") {
             OutlinedButton(
-              onClick = onPromptBlock,
+              onClick = onPromptIsolate,
               modifier = Modifier.height(26.dp),
               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
               colors = ButtonDefaults.outlinedButtonColors(contentColor = AlertRed),
               border = androidx.compose.foundation.BorderStroke(1.dp, AlertRed.copy(alpha = 0.6f))
             ) {
-              Text("Bloquear", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+              Text("Aislar", fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
           }
           IconButton(onClick = onDelete, modifier = Modifier.size(26.dp)) {
-            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar", tint = TextMuted, modifier = Modifier.size(15.dp))
+            Icon(Icons.Default.DeleteOutline, contentDescription = "Limpiar caché", tint = TextMuted, modifier = Modifier.size(15.dp))
           }
         }
       }
@@ -470,11 +499,11 @@ fun ForensicEventItem(
 }
 
 @Composable
-fun StatusBadge(status: String) {
+fun StatusBadge(status: String, severity: String = "") {
   val (bg, textColor, label) = when (status) {
-    "Blocked" -> Triple(RedGlow, AlertRed, "BLOCKED")
-    "Alerted" -> Triple(AmberGlow, WarningAmber, "ALERTED")
-    else -> Triple(GreenGlow, CyberGreen, "NORMAL")
+    "Blocked" -> Triple(RedGlow, AlertRed, if (severity.isNotBlank()) severity.uppercase() else "CRITICAL")
+    "Alerted" -> Triple(AmberGlow, WarningAmber, if (severity.isNotBlank()) severity.uppercase() else "WARNING")
+    else -> Triple(GreenGlow, CyberGreen, if (severity.isNotBlank()) severity.uppercase() else "INFO")
   }
 
   Surface(

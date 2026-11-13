@@ -6,8 +6,10 @@ import com.example.data.local.dao.MonitoredSessionDao
 import com.example.data.local.entity.ForensicEvent
 import com.example.data.local.entity.HoneygateConfigEntity
 import com.example.data.local.entity.MonitoredSessionEntity
-import com.example.data.remote.DaemonAlert
-import com.example.data.remote.DaemonSession
+import com.example.data.remote.DaemonConfigDto
+import com.example.data.remote.DaemonConfigUpdate
+import com.example.data.remote.DaemonEventDto
+import com.example.data.remote.DaemonSessionDto
 import com.example.data.remote.DaemonStatus
 import com.example.data.remote.HoneyGateDaemonClient
 import kotlinx.coroutines.flow.Flow
@@ -15,6 +17,15 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+data class DaemonSyncSummary(
+  val message: String,
+  val sessionsCount: Int,
+  val sessionsTotal: Int,
+  val eventsCount: Int,
+  val eventsTotal: Int,
+  val syncedAtMs: Long
+)
 
 class HoneyGateRepository(
   private val eventDao: ForensicEventDao,
@@ -27,14 +38,6 @@ class HoneyGateRepository(
   val allSessions: Flow<List<MonitoredSessionEntity>> = sessionDao.getAllSessions()
   val honeygateConfig: Flow<HoneygateConfigEntity?> = configDao.getConfig()
 
-  fun getEventsByType(type: String): Flow<List<ForensicEvent>> {
-    return if (type == "All") {
-      eventDao.getAllEvents()
-    } else {
-      eventDao.getEventsByType(type)
-    }
-  }
-
   suspend fun insertEvent(event: ForensicEvent) = eventDao.insertEvent(event)
 
   suspend fun deleteEvent(id: Long) = eventDao.deleteEventById(id)
@@ -46,75 +49,29 @@ class HoneyGateRepository(
   suspend fun getConfigOnce(): HoneygateConfigEntity? = configDao.getConfigOnce()
 
   /**
-   * Invariante 1: Generación del Fingerprint Compuesto (device_id inmutable).
-   * Combina MAC-por-SSID + Browser Fingerprint + Network JA3 + DHCP Fingerprint.
+   * Inicializa únicamente la fila de configuración local si la base Room está vacía.
+   * No precarga eventos ni sesiones falsas: Room actúa exclusivamente como caché del daemon.
    */
-  fun calculateCompositeDeviceId(
-    mac: String,
-    ssid: String = "Corp_Secure_WLAN",
-    userAgent: String = "Mozilla/5.0 (Linux; Android 14) Mobile",
-    canvasHash: String = "Canvas_A9F1",
-    ja3: String = "JA3_771_TLS",
-    dhcpOpt55: String = "DHCP_55_1_15_3_6"
-  ): String {
-    val raw = "$mac|$ssid|$userAgent|$canvasHash|$ja3|$dhcpOpt55"
-    val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
-    return "dev_" + digest.take(8).joinToString("") { "%02x".format(it) }
+  suspend fun preseedInitialDataIfEmpty() {
+    if (configDao.getConfigOnce() == null) {
+      configDao.saveConfig(HoneygateConfigEntity(id = 1))
+    }
   }
 
   /**
-   * Bloqueo confirmado por administrador (Invariante 5).
-   * Si el Daemon Linux está configurado y activo, dispara inmediatamente
-   * el aislamiento a nivel de kernel mediante shutdown(fd, SHUT_RDWR).
+   * Activa o desactiva el modo DEMO explícito. Al desactivarlo, elimina toda caché marcada isDemo=true.
    */
-  suspend fun updateMacBlockStatus(mac: String, deviceId: String, blocked: Boolean) {
-    sessionDao.setMacBlockedStatus(mac, blocked)
-    if (deviceId.isNotBlank()) {
-      sessionDao.setDeviceBlockedStatus(deviceId, blocked)
+  suspend fun setDemoMode(enabled: Boolean): HoneygateConfigEntity {
+    val current = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    if (!enabled) {
+      eventDao.clearByDemoFlag(true)
+      sessionDao.clearByDemoFlag(true)
     }
-
-    val session = sessionDao.getSessionByMac(mac) ?: if (deviceId.isNotBlank()) sessionDao.getSessionByDeviceId(deviceId) else null
-    val targetIp = session?.ipAddress ?: "0.0.0.0"
-
-    // Disparo de contención perimetral remota en el daemon de Linux si está activo
-    val config = configDao.getConfigOnce()
-    var daemonMsg = ""
-    if (config != null && config.daemonSyncEnabled && config.daemonBaseUrl.isNotBlank() && targetIp.isNotBlank() && targetIp != "0.0.0.0") {
-      val token = config.daemonAuthToken.trim()
-      if (token.isEmpty()) {
-        daemonMsg = " [Daemon Linux: Configurá el token]"
-      } else {
-        val remoteResult = if (blocked) {
-          daemonClient.remoteIsolate(config.daemonBaseUrl, token, targetIp, "Bloqueo confirmado por administrador en app HoneyGate para MAC $mac / $deviceId")
-        } else {
-          daemonClient.remoteUnblock(config.daemonBaseUrl, token, targetIp)
-        }
-        daemonMsg = remoteResult.fold(
-          onSuccess = { " [Kernel Linux: $it]" },
-          onFailure = { " [Daemon Linux no alcanzado: ${it.localizedMessage}]" }
-        )
-      }
-    }
-
-    val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-    eventDao.insertEvent(
-      ForensicEvent(
-        eventType = if (blocked) "Blocked" else "Alerted",
-        sourceIp = targetIp,
-        macAddress = mac,
-        deviceId = deviceId,
-        description = "Acción de Administrador confirmada: ${if (blocked) "BLOQUEO EN CASCADA" else "DESBLOQUEO"} aplicado a la MAC $mac y device_id $deviceId.$daemonMsg",
-        category = "ADMIN_CONTAINMENT",
-        severity = if (blocked) "CRITICAL" else "MEDIUM",
-        mitreTechnique = "T1562 - Impair Defenses (Mitigación Defensiva)",
-        dateFormatted = now
-      )
-    )
+    val updated = current.copy(demoModeEnabled = enabled)
+    configDao.saveConfig(updated)
+    return updated
   }
 
-  /**
-   * Consulta el estado en vivo del Daemon de HoneyGate en Linux (GET /api/status).
-   */
   suspend fun checkDaemonHealth(baseUrl: String, token: String): DaemonStatus {
     if (token.isBlank()) {
       return DaemonStatus(
@@ -127,494 +84,391 @@ class HoneyGateRepository(
   }
 
   /**
-   * Sincroniza la telemetría en vivo del Daemon Linux con la base de datos Room:
-   * - Ingesta sesiones activas de kernel (GET /api/connections).
-   * - Ingesta alertas forenses de inotify y honeypot (GET /api/alerts).
+   * Sincroniza la caché Room contra los endpoints reales del daemon:
+   * GET /api/config, GET /api/sessions?limit=...&offset=... y GET /api/events?limit=...&offset=...
    */
-  suspend fun syncWithDaemon(baseUrl: String, token: String): Result<String> {
+  suspend fun syncWithDaemon(
+    baseUrl: String,
+    token: String,
+    limit: Int = 50,
+    offset: Int = 0
+  ): Result<DaemonSyncSummary> {
     if (token.isBlank()) {
       return Result.failure(Exception("Configurá el token"))
     }
-    val sessionsResult = daemonClient.getActiveSessions(baseUrl, token)
-    val alertsResult = daemonClient.getAlerts(baseUrl, token)
+
+    val configResult = daemonClient.getConfig(baseUrl, token)
+    val sessionsResult = daemonClient.getSessions(baseUrl, token, limit = limit, offset = offset)
+    val eventsResult = daemonClient.getEvents(baseUrl, token, limit = limit, offset = offset)
+
+    val failure = listOf(configResult, sessionsResult, eventsResult).firstOrNull { it.isFailure }?.exceptionOrNull()
+    if (configResult.isFailure && sessionsResult.isFailure && eventsResult.isFailure) {
+      return Result.failure(failure ?: Exception("Sin conexión con el daemon"))
+    }
+
+    val syncedAt = System.currentTimeMillis()
+    val currentCfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    var updatedCfg = currentCfg.copy(lastSyncedAtMs = syncedAt)
+
+    configResult.onSuccess { dto ->
+      updatedCfg = mergeDaemonConfig(updatedCfg, dto, syncedAt)
+    }
+    configDao.saveConfig(updatedCfg)
 
     var sessionsIngested = 0
-    var alertsIngested = 0
-
-    sessionsResult.onSuccess { sessions ->
-      sessions.forEach { s ->
-        val devId = calculateCompositeDeviceId(s.mac)
-        val existing = sessionDao.getSessionByDeviceId(devId) ?: sessionDao.getSessionByMac(s.mac)
-        val entity = (existing ?: MonitoredSessionEntity(deviceId = devId, macAddress = s.mac, ipAddress = s.ip)).copy(
-          deviceId = devId,
-          macAddress = s.mac,
-          ipAddress = s.ip,
-          durationSeconds = s.durationSec,
-          outboundRequestsCount = s.outboundRateMin,
-          lastActivity = System.currentTimeMillis()
-        )
-        sessionDao.insertOrUpdate(entity)
-        sessionsIngested++
+    var sessionsTotal = 0
+    sessionsResult.onSuccess { page ->
+      sessionsTotal = page.total
+      val entities = page.sessions.map { mapSessionDtoToEntity(it) }
+      if (offset == 0) {
+        sessionDao.clearByDemoFlag(false)
       }
+      if (entities.isNotEmpty()) {
+        sessionDao.insertAll(entities)
+      }
+      sessionsIngested = entities.size
     }
 
-    alertsResult.onSuccess { alerts ->
-      val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-      alerts.forEach { a ->
-        eventDao.insertEvent(
-          ForensicEvent(
-            eventType = when (a.severity.lowercase()) {
-              "blocked", "critical" -> "Blocked"
-              "alerted", "high", "medium" -> "Alerted"
-              else -> "Normal"
-            },
-            sourceIp = "127.0.0.1",
-            macAddress = "00:00:00:00:00:00",
-            deviceId = "dev_daemon_sync",
-            description = "[Daemon Linux] ${a.title}: ${a.message}",
-            category = "DAEMON_SYNC_ALERT",
-            severity = a.severity.uppercase(),
-            mitreTechnique = "T1046 - Network Service Discovery",
-            dateFormatted = if (a.date.isNotBlank()) a.date else now,
-            isCorrelated = true
-          )
-        )
-        alertsIngested++
+    var eventsIngested = 0
+    var eventsTotal = 0
+    eventsResult.onSuccess { page ->
+      eventsTotal = page.total
+      val entities = page.events.map { mapEventDtoToEntity(it) }
+      if (offset == 0) {
+        eventDao.clearByDemoFlag(false)
       }
+      if (entities.isNotEmpty()) {
+        eventDao.insertAll(entities)
+      }
+      eventsIngested = entities.size
     }
 
-    return if (sessionsResult.isSuccess || alertsResult.isSuccess) {
-      Result.success("Telemetría sincronizada: $sessionsIngested sesiones activas y $alertsIngested alertas forenses.")
-    } else {
-      Result.failure(sessionsResult.exceptionOrNull() ?: alertsResult.exceptionOrNull() ?: Exception("Fallo en sincronización con Daemon"))
+    val summaryMsg = "Sincronizado con daemon: $sessionsIngested/$sessionsTotal sesiones y $eventsIngested/$eventsTotal eventos."
+    return Result.success(
+      DaemonSyncSummary(
+        message = summaryMsg,
+        sessionsCount = sessionsIngested,
+        sessionsTotal = sessionsTotal,
+        eventsCount = eventsIngested,
+        eventsTotal = eventsTotal,
+        syncedAtMs = syncedAt
+      )
+    )
+  }
+
+  /**
+   * Envía cambios de configuración al daemon vía PUT /api/config y persiste la respuesta real en Room.
+   */
+  suspend fun pushDaemonConfig(update: DaemonConfigUpdate): Result<DaemonConfigDto> {
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val baseUrl = cfg.daemonBaseUrl.trim()
+    val token = cfg.daemonAuthToken.trim()
+
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token para aplicar cambios en el daemon"))
+    }
+    if (baseUrl.isEmpty()) {
+      return Result.failure(Exception("Configurá la URL del daemon"))
+    }
+
+    val result = daemonClient.updateConfig(baseUrl, token, update)
+    result.onSuccess { dto ->
+      val syncedAt = System.currentTimeMillis()
+      val merged = mergeDaemonConfig(cfg, dto, syncedAt)
+      configDao.saveConfig(merged)
+    }
+    return result
+  }
+
+  /**
+   * Marca una sesión real como 'en_observacion' en el daemon (POST /api/sessions/{id}/observe).
+   */
+  suspend fun observeDaemonSession(
+    session: MonitoredSessionEntity,
+    reason: String
+  ): Result<MonitoredSessionEntity> {
+    if (session.isDemo) {
+      val updatedDemo = session.copy(
+        isInObservation = true,
+        currentStatus = "en_observacion",
+        observedReason = reason
+      )
+      sessionDao.insertOrUpdate(updatedDemo)
+      return Result.success(updatedDemo)
+    }
+
+    val daemonId = session.daemonSessionId
+      ?: return Result.failure(Exception("La sesión no tiene ID persistido en el daemon"))
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token"))
+    }
+
+    val result = daemonClient.observeSession(cfg.daemonBaseUrl, token, daemonId, reason)
+    return result.map { dto ->
+      val entity = mapSessionDtoToEntity(dto).copy(id = session.id)
+      sessionDao.insertOrUpdate(entity)
+      entity
     }
   }
 
   /**
-   * MODO 1: Portal cautivo con trazabilidad (monitoreo básico).
-   * - Registro SOLO con email (sin clave obligatoria).
-   * - Anti-Sybil: limitar/marcar múltiples registros desde un mismo device_id.
-   * - Reglas de velocidad: mails desechables, rotación de MAC con mismo navegador.
-   * - Marca 'en observación' (reduce lease DHCP a 300s, loguea, no bloquea de una).
+   * Aísla o desbloquea una IP en el daemon (POST /api/isolate o /api/unblock) y actualiza caché si tuvo éxito.
    */
-  suspend fun processMode1Registration(
-    email: String,
-    ip: String,
-    mac: String,
-    ssid: String = "Corp_Secure_WLAN",
-    browserFingerprint: String = "Canvas_A9F1",
-    ja3: String = "JA3_771"
-  ): Mode1AuthResult {
-    val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-    val deviceId = calculateCompositeDeviceId(mac, ssid, canvasHash = browserFingerprint, ja3 = ja3)
-    val existingSession = sessionDao.getSessionByDeviceId(deviceId) ?: sessionDao.getSessionByMac(mac)
-
-    // 1. Detección de dominio de email temporal / desechable
-    val disposableDomains = listOf("tempmail.com", "guerrillamail.com", "10minutemail.com", "mailinator.com", "throwaway.email")
-    val domain = email.substringAfter("@", "").lowercase()
-    val isDisposable = disposableDomains.any { domain.contains(it) }
-
-    if (isDisposable) {
-      val session = (existingSession ?: MonitoredSessionEntity(deviceId = deviceId, macAddress = mac, ipAddress = ip)).copy(
-        deviceId = deviceId,
-        ipAddress = ip,
-        lastActivity = System.currentTimeMillis(),
-        isInObservation = true,
-        dhcpLeaseSeconds = 300,
-        currentStatus = "Alerted",
-        detectedAnomaliesCsv = "DISPOSABLE_EMAIL_DOMAIN"
+  suspend fun updateSessionIsolation(
+    session: MonitoredSessionEntity,
+    blocked: Boolean
+  ): Result<String> {
+    if (session.isDemo) {
+      val updatedDemo = session.copy(
+        isMacBlocked = blocked,
+        currentStatus = if (blocked) "isolated" else "closed"
       )
-      sessionDao.insertOrUpdate(session)
-
-      eventDao.insertEvent(
-        ForensicEvent(
-          eventType = "Alerted",
-          sourceIp = ip,
-          macAddress = mac,
-          deviceId = deviceId,
-          description = "Anti-Sybil: Intento de registro con dominio desechable '$domain'. Dispositivo $deviceId marcado en observación. Lease DHCP reducido a 300s.",
-          category = "ANTI_SYBIL_DISPOSABLE",
-          severity = "HIGH",
-          mitreTechnique = "T1586.002 - Compromise Accounts: Email Accounts",
-          dateFormatted = now
-        )
-      )
-
-      return Mode1AuthResult(
-        accepted = true,
-        status = "Alerted",
-        message = "Registro completado en modo observación (dominio no corporativo). Acceso regulado.",
-        deviceId = deviceId,
-        inObservation = true
-      )
+      sessionDao.insertOrUpdate(updatedDemo)
+      return Result.success("[DEMO] Sesión ${session.ipAddress} actualizada localmente")
     }
 
-    // 2. Anti-Sybil: Múltiples emails desde el mismo device_id
-    val previousEmails = existingSession?.emailsUsedCsv?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
-    val isMultiEmail = previousEmails.isNotEmpty() && !previousEmails.contains(email)
-
-    if (isMultiEmail && previousEmails.size >= 2) {
-      val updatedEmails = (previousEmails + email).distinct().joinToString(", ")
-      val session = (existingSession ?: MonitoredSessionEntity(deviceId = deviceId, macAddress = mac, ipAddress = ip)).copy(
-        deviceId = deviceId,
-        ipAddress = ip,
-        lastActivity = System.currentTimeMillis(),
-        emailsUsedCsv = updatedEmails,
-        isInObservation = true,
-        dhcpLeaseSeconds = 300,
-        currentStatus = "Alerted",
-        detectedAnomaliesCsv = "MULTI_ACCOUNT_VELOCITY"
-      )
-      sessionDao.insertOrUpdate(session)
-
-      eventDao.insertEvent(
-        ForensicEvent(
-          eventType = "Alerted",
-          sourceIp = ip,
-          macAddress = mac,
-          deviceId = deviceId,
-          description = "Anti-Sybil: Múltiples registros detectados (${previousEmails.size + 1}) bajo el mismo device_id $deviceId. Dispositivo en observación con lease DHCP de 5 min.",
-          category = "ANTI_SYBIL_MULTI_USER",
-          severity = "HIGH",
-          mitreTechnique = "T1078 - Valid Accounts",
-          dateFormatted = now,
-          isCorrelated = true
-        )
-      )
-
-      return Mode1AuthResult(
-        accepted = true,
-        status = "Alerted",
-        message = "Identidad registrada. Tráfico asignado a perfil de auditoría con telemetría de sesión.",
-        deviceId = deviceId,
-        inObservation = true
-      )
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token"))
+    }
+    if (session.ipAddress.isBlank()) {
+      return Result.failure(Exception("Sesión sin IP de origen válida"))
     }
 
-    // 3. Registro Nominal Normal (Consentimiento Ley 25.326 aceptado)
-    val updatedEmails = (previousEmails + email).distinct().joinToString(", ")
-    val session = (existingSession ?: MonitoredSessionEntity(deviceId = deviceId, macAddress = mac, ipAddress = ip)).copy(
-      deviceId = deviceId,
-      macAddress = mac,
-      ipAddress = ip,
-      lastActivity = System.currentTimeMillis(),
-      emailsUsedCsv = updatedEmails,
-      currentStatus = "Normal",
-      consentAccepted = true
+    val remoteResult = if (blocked) {
+      daemonClient.remoteIsolate(
+        cfg.daemonBaseUrl,
+        token,
+        session.ipAddress,
+        "Aislamiento confirmado desde panel Android (device_id=${session.deviceId})"
+      )
+    } else {
+      daemonClient.remoteUnblock(cfg.daemonBaseUrl, token, session.ipAddress)
+    }
+
+    remoteResult.onSuccess {
+      sessionDao.insertOrUpdate(
+        session.copy(
+          isMacBlocked = blocked,
+          currentStatus = if (blocked) "isolated" else "closed"
+        )
+      )
+    }
+    return remoteResult
+  }
+
+  suspend fun isolateIpFromEvent(ip: String, deviceId: String): Result<String> {
+    if (ip.isBlank()) {
+      return Result.failure(Exception("Evento sin IP de origen válida"))
+    }
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token"))
+    }
+    return daemonClient.remoteIsolate(
+      cfg.daemonBaseUrl,
+      token,
+      ip,
+      "Aislamiento confirmado desde evento forense (device_id=$deviceId)"
     )
-    sessionDao.insertOrUpdate(session)
+  }
 
+  // ---------------------------------------------------------------------------
+  // Flujos locales estrictamente acotados al Modo DEMO (apagado por defecto)
+  // ---------------------------------------------------------------------------
+
+  fun calculateCompositeDeviceId(
+    mac: String,
+    ssid: String = "Demo_WLAN",
+    userAgent: String = "Demo_UA",
+    canvasHash: String = "Demo_Canvas",
+    ja3: String = "Demo_JA3",
+    dhcpOpt55: String = "Demo_DHCP"
+  ): String {
+    val raw = "$mac|$ssid|$userAgent|$canvasHash|$ja3|$dhcpOpt55"
+    val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
+    return "demo_" + digest.take(8).joinToString("") { "%02x".format(it) }
+  }
+
+  suspend fun runDemoMode1Registration(email: String, ip: String, mac: String): Mode1AuthResult {
+    val cfg = configDao.getConfigOnce()
+    if (cfg?.demoModeEnabled != true) {
+      return Mode1AuthResult(
+        accepted = false,
+        status = "disabled",
+        message = "Modo DEMO desactivado. Conectá el daemon para datos reales.",
+        deviceId = "",
+        inObservation = false
+      )
+    }
+    val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+    val deviceId = calculateCompositeDeviceId(mac)
+    val disposableDomains = listOf("tempmail.com", "guerrillamail.com", "10minutemail.com", "mailinator.com")
+    val domain = email.substringAfter("@", "").lowercase()
+    val inObservation = disposableDomains.any { domain.contains(it) }
+
+    sessionDao.insertOrUpdate(
+      MonitoredSessionEntity(
+        mode = 1,
+        deviceId = deviceId,
+        macAddress = mac,
+        ipAddress = ip,
+        deviceType = "Demo Client",
+        service = "portal-demo",
+        connectedAt = System.currentTimeMillis(),
+        lastActivity = System.currentTimeMillis(),
+        visitorLabel = email,
+        observedReason = if (inObservation) "[DEMO] Dominio temporal detectado" else "",
+        isInObservation = inObservation,
+        currentStatus = if (inObservation) "en_observacion" else "active",
+        isDemo = true
+      )
+    )
     eventDao.insertEvent(
       ForensicEvent(
-        eventType = "Normal",
+        eventType = if (inObservation) "Alerted" else "Normal",
+        rawEventType = if (inObservation) "DEMO_SYBIL_OBSERVATION" else "DEMO_PORTAL_REGISTRATION",
+        mode = 1,
         sourceIp = ip,
         macAddress = mac,
         deviceId = deviceId,
-        description = "Registro nominal verificado para '$email'. Metadatos registrados bajo Ley 25.326. Lease DHCP asignado: 3600s.",
-        category = "PORTAL_REGISTRATION",
-        severity = "LOW",
-        mitreTechnique = "T1078 - Valid Accounts",
-        dateFormatted = now
+        description = "[DEMO] Registro de '$email' en portal demostrativo.",
+        category = if (inObservation) "DEMO_SYBIL_OBSERVATION" else "DEMO_PORTAL_REGISTRATION",
+        severity = if (inObservation) "warning" else "info",
+        dateFormatted = nowStr,
+        isDemo = true
       )
     )
-
     return Mode1AuthResult(
       accepted = true,
-      status = "Normal",
-      message = "Registro exitoso. Navegación habilitada con trazabilidad nominal.",
+      status = if (inObservation) "en_observacion" else "active",
+      message = if (inObservation) "[DEMO] Dispositivo marcado en observación." else "[DEMO] Registro local de demostración completado.",
       deviceId = deviceId,
-      inObservation = false
+      inObservation = inObservation
     )
   }
 
-  /**
-   * MODO 2: Honeypot (auditoría para un cliente / Red Team).
-   * - Assume-breach con 3 canary users de áreas (sin claves).
-   * - Invariante 2: Contención de salida (whitelist / sinkhole).
-   * - Invariante 3: Detección y alerta de Honeytokens.
-   * - Captura de comandos y técnicas MITRE.
-   */
-  suspend fun processMode2RedTeamAction(
-    canaryUser: String,
-    command: String,
-    ip: String = "10.0.8.44",
-    mac: String = "aa:bb:cc:dd:ee:01"
-  ): Mode2ActionResult {
-    val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-    val deviceId = calculateCompositeDeviceId(mac, "RedTeam_Honeypot_VLAN")
-    val cmd = command.trim()
-
-    // 1. Detección de Honeytokens tocados (Invariante 3)
-    val touchedHoneytoken = when {
-      cmd.contains("/etc/shadow") || cmd.contains("shadow") -> "Honeytoken: Hash de root ficticio (\$6\$fakeSalt\$HoneyToken...)"
-      cmd.contains("AWS_SECRET") || cmd.contains(".env") -> "Honeytoken: AWS_SECRET_CANARY_X99A"
-      cmd.contains("SWIFT") || cmd.contains("transfer") -> "Honeytoken: DB_SWIFT_ROUTING_KEY_HONEY"
-      else -> null
-    }
-
-    // 2. Invariante 2: Contención de salida (Intento de exfiltración o conexión externa)
-    val isOutboundAttempt = cmd.contains("curl ") || cmd.contains("wget ") || cmd.contains("nc ") || cmd.contains("ssh ")
-    val isWhitelisted = cmd.contains("dns.google.com") || cmd.contains("corp.internal.net")
-
-    if (isOutboundAttempt && !isWhitelisted) {
-      eventDao.insertEvent(
-        ForensicEvent(
-          eventType = "Blocked",
-          sourceIp = ip,
-          macAddress = mac,
-          deviceId = deviceId,
-          description = "Contención de Salida (Invariante 2): Tráfico saliente bloqueado hacia destino no listado. Comando: '$cmd' redirigido a Sinkhole local.",
-          category = "EGRESS_CONTAINMENT_SINKHOLE",
-          severity = "CRITICAL",
-          destinationTarget = "SINKHOLE_127.0.0.1",
-          mitreTechnique = "T1048 - Exfiltration Over Alternative Protocol",
-          dateFormatted = now,
-          isCorrelated = true
-        )
-      )
-
+  suspend fun runDemoRedTeamCommand(canaryUser: String, command: String): Mode2ActionResult {
+    val cfg = configDao.getConfigOnce()
+    if (cfg?.demoModeEnabled != true) {
       return Mode2ActionResult(
-        commandOutput = "[SINKHOLE TRIGGERED] Conexión saliente contenida por política de HoneyGate. Redirigida a 127.0.0.1:0 (Drop pasivo).",
-        escalationLevel = "Nivel 2: Intento de Exfiltración Contenido",
-        isBlocked = true
-      )
-    }
-
-    if (touchedHoneytoken != null) {
-      eventDao.insertEvent(
-        ForensicEvent(
-          eventType = "Blocked",
-          sourceIp = ip,
-          macAddress = mac,
-          deviceId = deviceId,
-          description = "¡ALERTA CRÍTICA HONEYTOKEN! El Red Team tocó un dato señuelo controlado: $touchedHoneytoken mediante '$cmd' con el usuario canary $canaryUser.",
-          category = "HONEYTOKEN_TRIGGERED",
-          severity = "CRITICAL",
-          honeytokenTouched = touchedHoneytoken,
-          mitreTechnique = "T1003.008 - OS Credential Dumping: /etc/passwd and /etc/shadow",
-          dateFormatted = now,
-          isCorrelated = true
-        )
-      )
-
-      return Mode2ActionResult(
-        commandOutput = "root:\$6\$fakeSalt\$HoneyTokenHashK8J9...:19420:0:99999:7::: (Honeytoken Activo)",
-        escalationLevel = "Nivel 3: Compromiso de Honeytoken (Alerta Inmediata al Blue Team)",
+        commandOutput = "Modo DEMO desactivado. Activá 'Modo DEMO' para pruebas locales sin daemon.",
+        escalationLevel = "Modo real activo",
         isBlocked = false
       )
     }
-
-    // Mapeo general de comandos
-    val (output, level, technique) = when {
-      cmd.contains("sudo -l") -> Triple(
-        "(ALL) NOPASSWD: /usr/bin/service_emulator",
-        "Nivel 2: Enumeración de Sudoers",
-        "T1548.003 - Abuse Elevation Control Mechanism: Sudo"
-      )
-      cmd.contains("id") || cmd.contains("whoami") -> Triple(
-        "uid=1001($canaryUser) gid=1001(canary_sector) groups=1001(canary)",
-        "Nivel 1: Acceso Inicial Canary",
-        "T1033 - System Owner/User Discovery"
-      )
-      cmd.contains("netstat") || cmd.contains("ss ") -> Triple(
-        "Active Internet connections (servers and established)\ntcp 0 0 0.0.0.0:2222 0.0.0.0:* LISTEN (Emulated SSH)\ntcp 0 0 0.0.0.0:3306 0.0.0.0:* LISTEN (Emulated MySQL)\ntcp 0 0 0.0.0.0:8080 0.0.0.0:* LISTEN (Emulated Apache)",
-        "Nivel 1: Reconocimiento de Puertos",
-        "T1046 - Network Service Discovery"
-      )
-      else -> Triple(
-        "Comando '$cmd' procesado por el entorno emulado de HoneyGate.",
-        "Nivel 1: Actividad General",
-        "T1059 - Command and Scripting Interpreter"
-      )
+    val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+    val cmd = command.trim()
+    val isExfil = cmd.startsWith("curl ") || cmd.startsWith("wget ") || cmd.startsWith("nc ")
+    val isHoneytoken = cmd.contains("shadow") || cmd.contains("AWS_SECRET")
+    val out = when {
+      isExfil -> "[DEMO] Simulación de sinkhole local para '$cmd'"
+      isHoneytoken -> "[DEMO] Simulación de alerta honeytoken para '$canaryUser'"
+      else -> "[DEMO] Comando '$cmd' registrado en entorno de demostración"
     }
-
     eventDao.insertEvent(
       ForensicEvent(
-        eventType = "Alerted",
-        sourceIp = ip,
-        macAddress = mac,
-        deviceId = deviceId,
-        description = "Red Team [$canaryUser]: Ejecución de comando '$cmd'. TTP detectada y correlacionada.",
-        category = "REDTEAM_COMMAND_EXEC",
-        severity = "HIGH",
-        mitreTechnique = technique,
-        dateFormatted = now
+        eventType = if (isExfil || isHoneytoken) "Blocked" else "Alerted",
+        rawEventType = if (isHoneytoken) "DEMO_HONEYTOKEN" else "DEMO_REDTEAM_CMD",
+        mode = 2,
+        description = "[DEMO] Red Team ($canaryUser): $cmd",
+        category = "DEMO_REDTEAM_CMD",
+        severity = if (isExfil || isHoneytoken) "critical" else "warning",
+        dateFormatted = nowStr,
+        isDemo = true
       )
     )
-
     return Mode2ActionResult(
-      commandOutput = output,
-      escalationLevel = level,
-      isBlocked = false
+      commandOutput = out,
+      escalationLevel = if (isHoneytoken) "[DEMO] Honeytoken" else "[DEMO] Actividad simulada",
+      isBlocked = isExfil
     )
   }
 
-  /**
-   * Pre-carga de datos iniciales en la base de datos Room.
-   */
-  suspend fun preseedInitialDataIfEmpty() {
-    val initialConfig = HoneygateConfigEntity(
-      id = 1,
-      gateMode = 1,
-      companyName = "AeroSec Global Defense Corp",
-      primaryColorHex = "#10B981",
-      accentColorHex = "#06B6D4",
-      strictEgressContainment = true,
-      honeytokensActive = true,
-      legalConsentBannerEnabled = true
-    )
-    if (configDao.getConfigOnce() == null) {
-      configDao.saveConfig(initialConfig)
+  companion object {
+    fun mergeDaemonConfig(
+      current: HoneygateConfigEntity,
+      dto: DaemonConfigDto,
+      syncedAtMs: Long
+    ): HoneygateConfigEntity {
+      return current.copy(
+        gateMode = dto.mode,
+        retentionDays = dto.retentionDays,
+        maxOutboundPerMinute = dto.maxOutboundPerMinute,
+        portalEnabled = dto.portalEnabled,
+        honeypotEnabled = dto.honeypotEnabled,
+        allowedOutboundWhitelistCsv = dto.egressWhitelist.joinToString(", "),
+        sybilMaxEmailsPerDevice = dto.sybilMaxEmailsPerDevice,
+        sybilWindowSeconds = dto.sybilWindowSeconds,
+        configUpdatedAtSec = dto.updatedAt,
+        lastSyncedAtMs = syncedAtMs
+      )
     }
 
-    val sampleEvents = listOf(
-      ForensicEvent(
-        timestamp = System.currentTimeMillis() - 150000,
-        eventType = "Blocked",
-        sourceIp = "198.51.100.42",
-        macAddress = "08:00:27:fa:31:0a",
-        deviceId = "dev_a1b2c3d4",
-        description = "Contención Perimetral: Pivoteo saliente mitigado tras exceder umbral de 10 tramas/min. Syscall shutdown(SHUT_RDWR) ejecutada.",
-        category = "RATE_LIMIT_PIVOTING",
-        severity = "CRITICAL",
-        mitreTechnique = "T1046 - Network Service Discovery",
-        dateFormatted = "18:42:10",
-        isCorrelated = true
-      ),
-      ForensicEvent(
-        timestamp = System.currentTimeMillis() - 110000,
-        eventType = "Alerted",
-        sourceIp = "192.168.1.105",
-        macAddress = "52:54:00:12:34:56",
-        deviceId = "dev_e5f6g7h8",
-        description = "Invariante 3 (Honeytoken Activo): El usuario canary 'cfo_canary@honeygate.corp' tocó el archivo señuelo /etc/shadow. Payload registrado.",
-        category = "HONEYTOKEN_TRIGGERED",
-        severity = "HIGH",
-        honeytokenTouched = "/etc/shadow (Honeytoken Root Hash)",
-        mitreTechnique = "T1003.008 - OS Credential Dumping",
-        dateFormatted = "18:45:30",
-        isCorrelated = true
-      ),
-      ForensicEvent(
-        timestamp = System.currentTimeMillis() - 75000,
-        eventType = "Alerted",
-        sourceIp = "172.16.4.88",
-        macAddress = "00:1a:2b:3c:4d:5e",
-        deviceId = "dev_8899aabb",
-        description = "Anti-Sybil: Múltiples registros (3 identidades) desde el mismo device_id dev_8899aabb. Dispositivo puesto en observación (lease DHCP: 300s).",
-        category = "ANTI_SYBIL_MULTI_USER",
-        severity = "MEDIUM",
-        mitreTechnique = "T1078 - Valid Accounts",
-        dateFormatted = "18:49:12"
-      ),
-      ForensicEvent(
-        timestamp = System.currentTimeMillis() - 40000,
-        eventType = "Normal",
-        sourceIp = "10.0.2.15",
-        macAddress = "00:50:56:c0:00:08",
-        deviceId = "dev_12345678",
-        description = "Registro nominal bajo Modo 1 para 'jmartinez@aerosec.corp'. Consentimiento de metadatos Ley 25.326 verificado. Salida autorizada.",
-        category = "PORTAL_REGISTRATION",
-        severity = "LOW",
-        mitreTechnique = "T1078 - Valid Accounts",
-        dateFormatted = "18:52:04"
+    fun mapSessionDtoToEntity(dto: DaemonSessionDto): MonitoredSessionEntity {
+      return MonitoredSessionEntity(
+        daemonSessionId = dto.id,
+        mode = dto.mode,
+        deviceId = dto.deviceId,
+        macAddress = dto.mac,
+        ipAddress = dto.ip,
+        clientPort = dto.clientPort,
+        deviceType = dto.deviceType,
+        browserFingerprint = dto.browserFingerprint,
+        networkFingerprint = dto.networkFingerprint,
+        dhcpFingerprint = dto.dhcpFingerprint,
+        destIp = dto.destIp,
+        destPort = dto.destPort,
+        service = dto.service,
+        honeytokenTouched = dto.honeytokenTouched,
+        connectedAt = (dto.startedAt * 1000.0).toLong(),
+        endedAt = dto.endedAt?.let { (it * 1000.0).toLong() },
+        lastActivity = ((dto.endedAt ?: dto.startedAt) * 1000.0).toLong(),
+        durationSeconds = dto.durationSec.toLong(),
+        bytesIn = dto.bytesIn,
+        bytesOut = dto.bytesOut,
+        visitorLabel = dto.visitorLabel ?: "",
+        observedReason = dto.observedReason ?: "",
+        isMacBlocked = dto.status == "isolated",
+        isInObservation = dto.status == "en_observacion",
+        currentStatus = dto.status,
+        isDemo = false
       )
-    )
+    }
 
-    eventDao.insertAll(sampleEvents)
-
-    val sampleSessions = listOf(
-      MonitoredSessionEntity(
-        deviceId = "dev_a1b2c3d4",
-        macAddress = "08:00:27:fa:31:0a",
-        ipAddress = "198.51.100.42",
-        durationSeconds = 140,
-        emailsUsedCsv = "scan_attacker@mail.com",
-        isMacBlocked = true,
-        outboundRequestsCount = 14,
-        detectedAnomaliesCsv = "RATE_LIMIT_EXCEEDED",
-        currentStatus = "Blocked"
-      ),
-      MonitoredSessionEntity(
-        deviceId = "dev_e5f6g7h8",
-        macAddress = "52:54:00:12:34:56",
-        ipAddress = "192.168.1.105",
-        durationSeconds = 520,
-        emailsUsedCsv = "cfo_canary@honeygate.corp, redteam_probe@honeygate.corp",
-        isInObservation = true,
-        dhcpLeaseSeconds = 300,
-        outboundRequestsCount = 8,
-        visitedUrlsCsv = "honeygate.portal/auth, intranet.corp/secrets",
-        detectedAnomaliesCsv = "HONEYTOKEN_TOUCHED, MULTI_ACCOUNT",
-        currentStatus = "Alerted"
-      ),
-      MonitoredSessionEntity(
-        deviceId = "dev_12345678",
-        macAddress = "00:50:56:c0:00:08",
-        ipAddress = "10.0.2.15",
-        durationSeconds = 890,
-        emailsUsedCsv = "jmartinez@aerosec.corp",
-        currentStatus = "Normal",
-        consentAccepted = true
+    fun mapEventDtoToEntity(dto: DaemonEventDto): ForensicEvent {
+      val sevLower = dto.severity.lowercase()
+      val typeUpper = dto.eventType.uppercase()
+      val uiBucket = when {
+        sevLower == "critical" || typeUpper.contains("ISOLAT") || typeUpper.contains("DROPPED") || typeUpper.contains("CONTAINMENT") -> "Blocked"
+        sevLower == "warning" || typeUpper.contains("OBSERVED") || typeUpper.contains("FAILED") -> "Alerted"
+        else -> "Normal"
+      }
+      return ForensicEvent(
+        daemonEventId = dto.id,
+        sessionId = dto.sessionId,
+        timestamp = (dto.timestamp * 1000.0).toLong(),
+        eventType = uiBucket,
+        rawEventType = dto.eventType,
+        mode = dto.mode,
+        sourceIp = dto.ip ?: "",
+        macAddress = dto.metadataMac ?: "",
+        description = dto.description,
+        deviceId = dto.deviceId ?: "",
+        category = dto.eventType,
+        severity = dto.severity,
+        destinationTarget = dto.metadataTarget ?: "",
+        honeytokenTouched = dto.metadataHoneytoken,
+        mitreTechnique = dto.mitreTechnique ?: "",
+        isCorrelated = dto.sessionId != null,
+        dateFormatted = dto.createdAt,
+        isDemo = false
       )
-    )
-
-    sampleSessions.forEach { sessionDao.insertOrUpdate(it) }
-  }
-
-  /**
-   * Detección y correlación de Inyección SQL (SQLi) en el portal de autenticación.
-   * Si un atacante inyecta SQL para validar claves sin usuario registrado:
-   * 1. Se verifica la MAC y sus IPs asignadas en otras cuentas.
-   * 2. Se mantiene la correlación activa y se permite navegación monitorizada (sin cortar bruscamente).
-   * 3. Se genera un evento de alerta crítica y aviso al panel de administración para bloqueo en cascada.
-   */
-  suspend fun processSqlInjectionProbe(
-    payload: String,
-    ip: String = "192.168.1.189",
-    mac: String = "52:54:00:88:99:aa"
-  ): SqlInjectionResult {
-    val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-    val deviceId = calculateCompositeDeviceId(mac)
-    val existingSession = sessionDao.getSessionByDeviceId(deviceId) ?: sessionDao.getSessionByMac(mac)
-
-    val session = (existingSession ?: MonitoredSessionEntity(deviceId = deviceId, macAddress = mac, ipAddress = ip)).copy(
-      deviceId = deviceId,
-      macAddress = mac,
-      ipAddress = ip,
-      lastActivity = System.currentTimeMillis(),
-      isInObservation = true,
-      dhcpLeaseSeconds = 300,
-      currentStatus = "Alerted",
-      detectedAnomaliesCsv = if (existingSession?.detectedAnomaliesCsv.isNullOrBlank()) "SQL_INJECTION_ATTEMPT" else "${existingSession?.detectedAnomaliesCsv}, SQL_INJECTION_ATTEMPT"
-    )
-    sessionDao.insertOrUpdate(session)
-
-    val alertMsg = "Inyección SQL detectada: Payload '$payload' en validación de credenciales. Correlación activa: MAC $mac (IP $ip, device_id $deviceId). Navegación monitorizada y aviso al administrador disponible para bloqueo en cascada."
-
-    eventDao.insertEvent(
-      ForensicEvent(
-        eventType = "Alerted",
-        sourceIp = ip,
-        macAddress = mac,
-        deviceId = deviceId,
-        description = alertMsg,
-        category = "SQL_INJECTION_DETECTED",
-        severity = "CRITICAL",
-        mitreTechnique = "T1190 - Exploit Public-Facing Application",
-        dateFormatted = now,
-        isCorrelated = true
-      )
-    )
-
-    return SqlInjectionResult(
-      detected = true,
-      payload = payload,
-      correlatedIp = ip,
-      correlatedMac = mac,
-      deviceId = deviceId,
-      alertMessage = alertMsg
-    )
+    }
   }
 }
 
@@ -630,15 +484,6 @@ data class Mode2ActionResult(
   val commandOutput: String,
   val escalationLevel: String,
   val isBlocked: Boolean
-)
-
-data class SqlInjectionResult(
-  val detected: Boolean,
-  val payload: String,
-  val correlatedIp: String,
-  val correlatedMac: String,
-  val deviceId: String,
-  val alertMessage: String
 )
 
 data class OtpChallenge(

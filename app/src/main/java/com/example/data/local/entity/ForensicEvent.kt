@@ -4,25 +4,30 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /**
- * Entidad Room 'ForensicEvent' requerida para persistir logs del sistema de monitoreo.
- * Incluye campos obligatorios: id, timestamp, eventType (Blocked, Alerted, Normal), sourceIp, macAddress, description.
- * Más los campos del esquema unificado de HoneyGate (deviceId compuesto, técnica MITRE, honeytokens).
+ * Caché local en Room de los eventos entregados por GET /api/events del daemon HoneyGate.
+ * No inventa valores por defecto: refleja los campos reales del daemon o marca isDemo = true
+ * únicamente cuando el usuario habilita el modo DEMO local.
  */
 @Entity(tableName = "forensic_events")
 data class ForensicEvent(
   @PrimaryKey(autoGenerate = true)
   val id: Long = 0,
+  val daemonEventId: Long? = null,
+  val sessionId: Long? = null,
   val timestamp: Long = System.currentTimeMillis(),
-  val eventType: String, // "Blocked", "Alerted", "Normal"
-  val sourceIp: String,
-  val macAddress: String,
-  val description: String,
-  val deviceId: String = "", // Fingerprint compuesto (Invariante 1)
-  val category: String = "GENERAL_MONITORING",
-  val severity: String = "LOW",
-  val destinationTarget: String = "127.0.0.1:8080",
+  val eventType: String, // Bucket UI derivado de severity/event_type ("Blocked", "Alerted", "Normal")
+  val rawEventType: String = "", // event_type exacto devuelto por el daemon
+  val mode: Int = 1,
+  val sourceIp: String = "",
+  val macAddress: String = "",
+  val description: String = "",
+  val deviceId: String = "",
+  val category: String = "", // Igual a event_type del daemon
+  val severity: String = "info", // "info", "normal", "warning", "critical"
+  val destinationTarget: String = "",
   val honeytokenTouched: String? = null,
-  val mitreTechnique: String = "T1190 - Exploit Public-Facing Application",
+  val mitreTechnique: String = "",
   val isCorrelated: Boolean = false,
-  val dateFormatted: String = ""
+  val dateFormatted: String = "", // created_at del daemon
+  val isDemo: Boolean = false
 )

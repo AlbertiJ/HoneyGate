@@ -2,8 +2,6 @@ package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -15,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -27,27 +26,34 @@ import com.example.ui.theme.*
 @Composable
 fun AdminSessionsScreen(
   sessions: List<MonitoredSessionEntity>,
-  onBlockMacConfirmed: (String, String) -> Unit,
-  onUnblockMacConfirmed: (String, String) -> Unit
+  isOnline: Boolean,
+  onIsolateConfirmed: (MonitoredSessionEntity) -> Unit,
+  onUnblockConfirmed: (MonitoredSessionEntity) -> Unit,
+  onObserveConfirmed: (MonitoredSessionEntity, String) -> Unit,
+  onRefreshFromDaemon: () -> Unit
 ) {
-  var pendingBlockTarget by remember { mutableStateOf<Pair<String, String>?>(null) } // mac to deviceId
+  var pendingIsolateSession by remember { mutableStateOf<MonitoredSessionEntity?>(null) }
+  var pendingObserveSession by remember { mutableStateOf<MonitoredSessionEntity?>(null) }
+  var observeReasonInput by remember { mutableStateOf("Actividad inusual observada por operador") }
   var selectedSessionFilter by remember { mutableStateOf("All") }
   var sessionSearchQuery by remember { mutableStateOf("") }
 
   val filteredSessions = remember(sessions, selectedSessionFilter, sessionSearchQuery) {
     sessions.filter { s ->
+      val isIsolated = s.currentStatus == "isolated" || s.isMacBlocked
+      val isObserved = s.currentStatus == "en_observacion" || s.isInObservation
       val matchesFilter = when (selectedSessionFilter) {
-        "Blocked" -> s.isMacBlocked || s.currentStatus == "Blocked"
-        "Alerted" -> s.isInObservation || s.currentStatus == "Alerted"
-        "Normal" -> !s.isMacBlocked && !s.isInObservation && s.currentStatus == "Normal"
+        "isolated" -> isIsolated
+        "en_observacion" -> isObserved
+        "active" -> !isIsolated && !isObserved
         else -> true
       }
       val matchesQuery = if (sessionSearchQuery.isBlank()) true else {
         s.ipAddress.contains(sessionSearchQuery, ignoreCase = true) ||
-        s.macAddress.contains(sessionSearchQuery, ignoreCase = true) ||
-        s.deviceId.contains(sessionSearchQuery, ignoreCase = true) ||
-        s.emailsUsedCsv.contains(sessionSearchQuery, ignoreCase = true) ||
-        s.detectedAnomaliesCsv.contains(sessionSearchQuery, ignoreCase = true)
+          s.macAddress.contains(sessionSearchQuery, ignoreCase = true) ||
+          s.deviceId.contains(sessionSearchQuery, ignoreCase = true) ||
+          s.service.contains(sessionSearchQuery, ignoreCase = true) ||
+          s.visitorLabel.contains(sessionSearchQuery, ignoreCase = true)
       }
       matchesFilter && matchesQuery
     }
@@ -58,7 +64,6 @@ fun AdminSessionsScreen(
       .fillMaxSize()
       .padding(horizontal = 14.dp, vertical = 8.dp)
   ) {
-    // Cabecera Informativa
     Card(
       modifier = Modifier.fillMaxWidth(),
       shape = RoundedCornerShape(10.dp),
@@ -71,8 +76,8 @@ fun AdminSessionsScreen(
         verticalAlignment = Alignment.CenterVertically
       ) {
         Column(modifier = Modifier.weight(1f)) {
-          Text("Panel de Administración y Correlación (Invariante 1)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 12.sp)
-          Text("Identificación por device_id compuesto (anti MAC spoofing/NAT). Bloqueo sujeto a confirmación.", fontSize = 10.sp, color = TextSecondary)
+          Text("Sesiones Unificadas (/api/sessions)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 12.sp)
+          Text("Origen, destino y estado desde SQLite del daemon. Acciones de aislamiento con confirmación.", fontSize = 10.sp, color = TextSecondary)
         }
         Icon(Icons.Default.AdminPanelSettings, contentDescription = null, tint = WarningAmber, modifier = Modifier.size(20.dp))
       }
@@ -80,39 +85,54 @@ fun AdminSessionsScreen(
 
     Spacer(modifier = Modifier.height(8.dp))
 
-    // Buscador
-    OutlinedTextField(
-      value = sessionSearchQuery,
-      onValueChange = { sessionSearchQuery = it },
-      modifier = Modifier
-        .fillMaxWidth()
-        .testTag("search_admin_sessions"),
-      placeholder = { Text("Buscar por IP, MAC, device_id o email...", fontSize = 11.sp, color = TextMuted) },
-      leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(18.dp)) },
-      trailingIcon = {
-        if (sessionSearchQuery.isNotEmpty()) {
-          IconButton(onClick = { sessionSearchQuery = "" }) {
-            Icon(Icons.Default.Close, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      OutlinedTextField(
+        value = sessionSearchQuery,
+        onValueChange = { sessionSearchQuery = it },
+        modifier = Modifier
+          .weight(1f)
+          .testTag("search_admin_sessions"),
+        placeholder = { Text("Buscar por IP, MAC, device_id o servicio...", fontSize = 11.sp, color = TextMuted) },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(18.dp)) },
+        trailingIcon = {
+          if (sessionSearchQuery.isNotEmpty()) {
+            IconButton(onClick = { sessionSearchQuery = "" }) {
+              Icon(Icons.Default.Close, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+            }
           }
-        }
-      },
-      singleLine = true,
-      textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = TextPrimary),
-      shape = RoundedCornerShape(8.dp),
-      colors = OutlinedTextFieldDefaults.colors(
-        focusedContainerColor = DarkSurface,
-        unfocusedContainerColor = DarkSurface,
-        focusedBorderColor = CyberCyan,
-        unfocusedBorderColor = DarkBorder
+        },
+        singleLine = true,
+        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = TextPrimary),
+        shape = RoundedCornerShape(8.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+          focusedContainerColor = DarkSurface,
+          unfocusedContainerColor = DarkSurface,
+          focusedBorderColor = CyberCyan,
+          unfocusedBorderColor = DarkBorder
+        )
       )
-    )
+
+      IconButton(
+        onClick = onRefreshFromDaemon,
+        modifier = Modifier
+          .size(48.dp)
+          .clip(RoundedCornerShape(8.dp))
+          .background(DarkSurface)
+          .testTag("refresh_sessions_button")
+      ) {
+        Icon(Icons.Default.Refresh, contentDescription = "Actualizar sesiones del daemon", tint = CyberCyan)
+      }
+    }
 
     Spacer(modifier = Modifier.height(6.dp))
 
-    // Filtros por Estado
-    val blockedCount = sessions.count { it.isMacBlocked || it.currentStatus == "Blocked" }
-    val alertedCount = sessions.count { it.isInObservation || it.currentStatus == "Alerted" }
-    val normalCount = sessions.count { !it.isMacBlocked && !it.isInObservation && it.currentStatus == "Normal" }
+    val isolatedCount = sessions.count { it.currentStatus == "isolated" || it.isMacBlocked }
+    val observedCount = sessions.count { it.currentStatus == "en_observacion" || it.isInObservation }
+    val otherCount = sessions.size - isolatedCount - observedCount
 
     LazyRow(
       modifier = Modifier.fillMaxWidth(),
@@ -121,16 +141,16 @@ fun AdminSessionsScreen(
     ) {
       val options = listOf(
         "All" to "Todas (${sessions.size})",
-        "Blocked" to "Bloqueadas ($blockedCount)",
-        "Alerted" to "En Observación ($alertedCount)",
-        "Normal" to "Nominales ($normalCount)"
+        "isolated" to "Aisladas ($isolatedCount)",
+        "en_observacion" to "En Observación ($observedCount)",
+        "active" to "Activas/Cerradas ($otherCount)"
       )
       items(options) { (key, label) ->
         val isSelected = selectedSessionFilter == key
         val (chipBg, chipBorder, chipText) = when (key) {
-          "Blocked" -> Triple(if (isSelected) RedGlow else DarkSurface, AlertRed, AlertRed)
-          "Alerted" -> Triple(if (isSelected) AmberGlow else DarkSurface, WarningAmber, WarningAmber)
-          "Normal" -> Triple(if (isSelected) GreenGlow else DarkSurface, CyberGreen, CyberGreen)
+          "isolated" -> Triple(if (isSelected) RedGlow else DarkSurface, AlertRed, AlertRed)
+          "en_observacion" -> Triple(if (isSelected) AmberGlow else DarkSurface, WarningAmber, WarningAmber)
+          "active" -> Triple(if (isSelected) GreenGlow else DarkSurface, CyberGreen, CyberGreen)
           else -> Triple(if (isSelected) CyanGlow else DarkSurface, CyberCyan, CyberCyan)
         }
 
@@ -160,9 +180,18 @@ fun AdminSessionsScreen(
     if (filteredSessions.isEmpty()) {
       Box(modifier = Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Icon(Icons.Default.Dns, contentDescription = null, tint = TextMuted, modifier = Modifier.size(36.dp))
+          Icon(
+            imageVector = if (isOnline) Icons.Default.Dns else Icons.Default.CloudOff,
+            contentDescription = null,
+            tint = TextMuted,
+            modifier = Modifier.size(36.dp)
+          )
           Spacer(modifier = Modifier.height(8.dp))
-          Text("No hay sesiones que coincidan con el criterio seleccionado.", color = TextMuted, fontSize = 11.sp)
+          Text(
+            text = if (isOnline) "No hay sesiones registradas en el daemon." else "Sin conexión — caché de sesiones vacía.",
+            color = TextMuted,
+            fontSize = 11.sp
+          )
         }
       }
     } else {
@@ -174,18 +203,21 @@ fun AdminSessionsScreen(
         items(filteredSessions, key = { it.id }) { session ->
           SessionItemCard(
             session = session,
-            onPromptBlock = { pendingBlockTarget = session.macAddress to session.deviceId },
-            onUnblock = { onUnblockMacConfirmed(session.macAddress, session.deviceId) }
+            onPromptIsolate = { pendingIsolateSession = session },
+            onUnblock = { onUnblockConfirmed(session) },
+            onPromptObserve = {
+              observeReasonInput = "Marcada en observación desde panel Android"
+              pendingObserveSession = session
+            }
           )
         }
       }
     }
   }
 
-  // Invariante 5: Diálogo de Confirmación Obligatorio para Acciones Destructivas / Bloqueo
-  pendingBlockTarget?.let { (mac, devId) ->
+  pendingIsolateSession?.let { target ->
     AlertDialog(
-      onDismissRequest = { pendingBlockTarget = null },
+      onDismissRequest = { pendingIsolateSession = null },
       containerColor = DarkSurface,
       titleContentColor = AlertRed,
       textContentColor = TextSecondary,
@@ -193,7 +225,7 @@ fun AdminSessionsScreen(
       title = { Text("Confirmación Requerida (Invariante 5)", fontSize = 13.sp, fontWeight = FontWeight.Bold) },
       text = {
         Text(
-          "¿Confirmas el aislamiento y bloqueo en cascada para la dirección MAC $mac y el device_id $devId? Esta acción suspenderá inmediatamente el tráfico y revocará todas las identidades asociadas.",
+          "¿Confirmas el aislamiento de la IP ${target.ipAddress} (sesión #${target.daemonSessionId ?: target.id}, device_id: ${target.deviceId}) mediante POST /api/isolate?",
           fontSize = 11.sp,
           color = TextPrimary,
           lineHeight = 15.sp
@@ -202,16 +234,59 @@ fun AdminSessionsScreen(
       confirmButton = {
         Button(
           onClick = {
-            onBlockMacConfirmed(mac, devId)
-            pendingBlockTarget = null
+            onIsolateConfirmed(target)
+            pendingIsolateSession = null
           },
           colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
         ) {
-          Text("Confirmar Bloqueo", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          Text("Confirmar Aislamiento", fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
       },
       dismissButton = {
-        TextButton(onClick = { pendingBlockTarget = null }) {
+        TextButton(onClick = { pendingIsolateSession = null }) {
+          Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
+        }
+      }
+    )
+  }
+
+  pendingObserveSession?.let { target ->
+    AlertDialog(
+      onDismissRequest = { pendingObserveSession = null },
+      containerColor = DarkSurface,
+      titleContentColor = WarningAmber,
+      textContentColor = TextSecondary,
+      title = { Text("Marcar Sesión en Observación", fontSize = 13.sp, fontWeight = FontWeight.Bold) },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text(
+            "Se enviará POST /api/sessions/${target.daemonSessionId ?: target.id}/observe para ${target.ipAddress}.",
+            fontSize = 11.sp,
+            color = TextPrimary
+          )
+          OutlinedTextField(
+            value = observeReasonInput,
+            onValueChange = { observeReasonInput = it },
+            label = { Text("Motivo (reason)", fontSize = 10.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("observe_reason_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary)
+          )
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onObserveConfirmed(target, observeReasonInput.ifBlank { "Marcada en observación por operador" })
+            pendingObserveSession = null
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = WarningAmber, contentColor = Color.Black)
+        ) {
+          Text("Marcar en observación", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { pendingObserveSession = null }) {
           Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
         }
       }
@@ -222,23 +297,25 @@ fun AdminSessionsScreen(
 @Composable
 fun SessionItemCard(
   session: MonitoredSessionEntity,
-  onPromptBlock: () -> Unit,
-  onUnblock: () -> Unit
+  onPromptIsolate: () -> Unit,
+  onUnblock: () -> Unit,
+  onPromptObserve: () -> Unit
 ) {
   var isExpanded by remember { mutableStateOf(false) }
-  val isBlocked = session.isMacBlocked || session.currentStatus == "Blocked"
-  val isAlerted = session.isInObservation || session.currentStatus == "Alerted"
+  val isIsolated = session.currentStatus == "isolated" || session.isMacBlocked
+  val isObserved = session.currentStatus == "en_observacion" || session.isInObservation
 
   val (borderColor, statusBadgeBg, statusBadgeColor, statusLabel) = when {
-    isBlocked -> Quadruple(AlertRed, RedGlow, AlertRed, "BLOQUEADO")
-    isAlerted -> Quadruple(WarningAmber, AmberGlow, WarningAmber, "EN OBSERVACIÓN")
-    else -> Quadruple(CyberGreen, GreenGlow, CyberGreen, "NOMINAL")
+    isIsolated -> Quadruple(AlertRed, RedGlow, AlertRed, "ISOLATED")
+    isObserved -> Quadruple(WarningAmber, AmberGlow, WarningAmber, "EN OBSERVACIÓN")
+    session.currentStatus == "closed" -> Quadruple(CyberCyan, CyanGlow, CyberCyan, "CLOSED")
+    else -> Quadruple(CyberGreen, GreenGlow, CyberGreen, session.currentStatus.uppercase().ifBlank { "ACTIVE" })
   }
 
   Card(
     modifier = Modifier
       .fillMaxWidth()
-      .testTag("session_card_${session.macAddress}"),
+      .testTag("session_card_${session.daemonSessionId ?: session.id}"),
     shape = RoundedCornerShape(10.dp),
     colors = CardDefaults.cardColors(containerColor = DarkSurface),
     border = androidx.compose.foundation.BorderStroke(1.dp, borderColor.copy(alpha = 0.4f))
@@ -259,11 +336,29 @@ fun SessionItemCard(
               modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
             )
           }
-          Text(session.ipAddress, fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+          Text(
+            text = "#${session.daemonSessionId ?: session.id} ${session.ipAddress}",
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace
+          )
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-          if (isBlocked) {
+          if (!isObserved && !isIsolated && (session.daemonSessionId != null || session.isDemo)) {
+            OutlinedButton(
+              onClick = onPromptObserve,
+              modifier = Modifier.height(26.dp),
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+              colors = ButtonDefaults.outlinedButtonColors(contentColor = WarningAmber),
+              border = androidx.compose.foundation.BorderStroke(1.dp, WarningAmber.copy(alpha = 0.7f))
+            ) {
+              Text("Observar", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+          }
+
+          if (isIsolated) {
             OutlinedButton(
               onClick = onUnblock,
               modifier = Modifier.height(26.dp),
@@ -275,12 +370,12 @@ fun SessionItemCard(
             }
           } else {
             Button(
-              onClick = onPromptBlock,
+              onClick = onPromptIsolate,
               modifier = Modifier.height(26.dp),
               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
               colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
             ) {
-              Text("Bloquear (Inv 5)", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+              Text("Aislar", fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
           }
 
@@ -299,28 +394,40 @@ fun SessionItemCard(
       }
 
       Spacer(modifier = Modifier.height(6.dp))
-      Text("device_id: ${session.deviceId}", fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
-      Text("MAC Física: ${session.macAddress} | Lease DHCP: ${session.dhcpLeaseSeconds}s", fontSize = 10.sp, color = TextMuted, fontFamily = FontFamily.Monospace)
+      Text("device_id: ${session.deviceId.ifBlank { "—" }}", fontSize = 10.sp, color = CyberCyan, fontFamily = FontFamily.Monospace)
+      Text(
+        "MAC: ${session.macAddress.ifBlank { "—" }} | Servicio: ${session.service.ifBlank { "—" }}:${session.destPort}",
+        fontSize = 10.sp,
+        color = TextMuted,
+        fontFamily = FontFamily.Monospace
+      )
 
-      if (session.emailsUsedCsv.isNotBlank()) {
+      if (session.visitorLabel.isNotBlank()) {
         Spacer(modifier = Modifier.height(2.dp))
-        Text("Emails Vinculados: ${session.emailsUsedCsv}", fontSize = 10.sp, color = TextPrimary)
+        Text("visitor_label: ${session.visitorLabel}", fontSize = 10.sp, color = TextPrimary)
       }
 
-      if (session.detectedAnomaliesCsv.isNotBlank()) {
-        Text("⚠️ Anomalías: ${session.detectedAnomaliesCsv}", fontSize = 9.sp, color = WarningAmber, fontWeight = FontWeight.SemiBold)
+      if (session.observedReason.isNotBlank()) {
+        Text("observed_reason: ${session.observedReason}", fontSize = 9.sp, color = WarningAmber, fontWeight = FontWeight.SemiBold)
       }
 
       AnimatedVisibility(visible = isExpanded) {
         Column(modifier = Modifier.padding(top = 8.dp)) {
           Divider(color = DarkBorder, modifier = Modifier.padding(vertical = 4.dp))
-          Text("Telemetría Profunda de Fingerprint (Invariante 1):", fontSize = 10.sp, color = CyberCyan, fontWeight = FontWeight.Bold)
-          Text("• Huella Canvas: ${session.browserFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
-          Text("• Huella TLS JA3: ${session.ja3Fingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
-          Text("• Huella DHCP: ${session.dhcpFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
-          Text("• Duración de Conexión: ${session.durationSeconds} segundos", fontSize = 9.sp, color = TextSecondary)
-          if (session.visitedUrlsCsv.isNotBlank()) {
-            Text("• Destinos Auditados: ${session.visitedUrlsCsv}", fontSize = 9.sp, color = WarningAmber, fontFamily = FontFamily.Monospace)
+          Text("Detalle real (/api/sessions):", fontSize = 10.sp, color = CyberCyan, fontWeight = FontWeight.Bold)
+          Text("• mode: ${session.mode} | device_type: ${session.deviceType.ifBlank { "—" }}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          Text("• duration_sec: ${session.durationSeconds}s | bytes_in: ${session.bytesIn} | bytes_out: ${session.bytesOut}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          if (session.browserFingerprint.isNotBlank()) {
+            Text("• fingerprints.browser: ${session.browserFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          }
+          if (session.networkFingerprint.isNotBlank()) {
+            Text("• fingerprints.network: ${session.networkFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          }
+          if (session.dhcpFingerprint.isNotBlank()) {
+            Text("• fingerprints.dhcp: ${session.dhcpFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          }
+          session.honeytokenTouched?.let {
+            Text("• honeytoken_touched: $it", fontSize = 9.sp, color = AlertRed, fontFamily = FontFamily.Monospace)
           }
         }
       }

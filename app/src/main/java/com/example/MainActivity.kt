@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,6 +32,9 @@ import com.example.ui.screens.ForensicEventsScreen
 import com.example.ui.screens.HoneygateScreen
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.HoneyGateViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,13 +54,12 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   var selectedTab by remember { mutableIntStateOf(0) }
 
   val tabs = listOf(
-    NavigationTabItem("Eventos Forenses", Icons.Default.Shield),
-    NavigationTabItem("Puerta de Miel", Icons.Default.DoorSliding),
-    NavigationTabItem("Correlación Admin", Icons.Default.AdminPanelSettings),
-    NavigationTabItem("Informe Blue Team", Icons.Default.Description)
+    NavigationTabItem("Eventos", Icons.Default.Shield),
+    NavigationTabItem("Operación", Icons.Default.DoorSliding),
+    NavigationTabItem("Sesiones", Icons.Default.AdminPanelSettings),
+    NavigationTabItem("Informe", Icons.Default.Description)
   )
 
-  // Observación reactiva de estados desde Room Database a través de StateFlow
   val events by viewModel.eventsList.collectAsStateWithLifecycle()
   val selectedFilter by viewModel.selectedFilter.collectAsStateWithLifecycle()
   val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
@@ -69,7 +72,6 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   val mode1Result by viewModel.mode1Result.collectAsStateWithLifecycle()
   val mode2Result by viewModel.mode2Result.collectAsStateWithLifecycle()
   val otpChallenge by viewModel.otpChallenge.collectAsStateWithLifecycle()
-  val sqlInjectionResult by viewModel.sqlInjectionResult.collectAsStateWithLifecycle()
   val redTeamLogs by viewModel.redTeamTerminalHistory.collectAsStateWithLifecycle()
   val escalationLevel by viewModel.escalationLevel.collectAsStateWithLifecycle()
 
@@ -77,6 +79,8 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   val isSyncingDaemon by viewModel.isSyncingDaemon.collectAsStateWithLifecycle()
   val daemonSyncMessage by viewModel.daemonSyncMessage.collectAsStateWithLifecycle()
   var showDaemonDialog by remember { mutableStateOf(false) }
+
+  val isOnline = daemonStatus?.online == true
 
   Scaffold(
     modifier = Modifier.fillMaxSize(),
@@ -116,7 +120,7 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
                 color = TextPrimary
               )
               Text(
-                text = "Portal Cautivo de Decepción & Telemetría Forense",
+                text = "Panel de Control & Telemetría Forense",
                 fontSize = 10.sp,
                 color = CyberCyan
               )
@@ -124,32 +128,31 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
           }
         },
         actions = {
+          if (honeygateConfig.demoModeEnabled) {
+            Surface(
+              shape = RoundedCornerShape(16.dp),
+              color = AmberGlow,
+              border = androidx.compose.foundation.BorderStroke(1.dp, WarningAmber),
+              modifier = Modifier
+                .padding(end = 6.dp)
+                .clickable { showDaemonDialog = true }
+                .testTag("demo_badge")
+            ) {
+              Text(
+                text = "DEMO",
+                fontSize = 10.sp,
+                color = WarningAmber,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+              )
+            }
+          }
           DaemonStatusBadge(
             daemonStatus = daemonStatus,
             isSyncing = isSyncingDaemon,
-            onClick = { showDaemonDialog = true }
-          )
-          Spacer(modifier = Modifier.width(6.dp))
-          Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = GreenGlow,
-            border = androidx.compose.foundation.BorderStroke(1.dp, CyberGreen),
+            onClick = { showDaemonDialog = true },
             modifier = Modifier.padding(end = 12.dp)
-          ) {
-            Row(
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-              Box(
-                modifier = Modifier
-                  .size(8.dp)
-                  .clip(CircleShape)
-                  .background(CyberGreen)
-              )
-              Text("Room DB", fontSize = 10.sp, color = CyberGreen, fontWeight = FontWeight.SemiBold)
-            }
-          }
+          )
         }
       )
     },
@@ -180,64 +183,118 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
       }
     }
   ) { innerPadding ->
-    Box(
+    Column(
       modifier = Modifier
         .fillMaxSize()
         .padding(innerPadding)
     ) {
-      when (selectedTab) {
-        0 -> ForensicEventsScreen(
-          events = events,
-          selectedFilter = selectedFilter,
-          searchQuery = searchQuery,
-          blockedCount = blockedCount,
-          alertedCount = alertedCount,
-          normalCount = normalCount,
-          onFilterSelected = { viewModel.setFilter(it) },
-          onSearchQueryChanged = { viewModel.setSearchQuery(it) },
-          onBlockMacConfirmed = { mac, devId -> viewModel.blockMacConfirmed(mac, devId) },
-          onDeleteEvent = { viewModel.clearAllEvents() }
-        )
-        1 -> HoneygateScreen(
-          config = honeygateConfig,
-          mode1Result = mode1Result,
-          mode2Result = mode2Result,
-          otpChallenge = otpChallenge,
-          sqlInjectionResult = sqlInjectionResult,
-          redTeamLogs = redTeamLogs,
-          escalationLevel = escalationLevel,
-          onSaveConfig = { viewModel.saveConfig(it) },
-          onRegisterMode1 = { email, ip, mac ->
-            viewModel.registerMode1(email, ip, mac)
-          },
-          onRequestOtp = { email, ip, mac ->
-            viewModel.requestOtp(email, ip, mac)
-          },
-          onVerifyOtp = { code, ip, mac ->
-            viewModel.verifyOtpAndRegister(code, ip, mac)
-          },
-          onDismissOtp = { viewModel.dismissOtpChallenge() },
-          onTestSqlInjection = { payload, ip, mac ->
-            viewModel.triggerSqlInjectionTest(payload, ip, mac)
-          },
-          onClearSqlInjection = { viewModel.clearSqlInjectionResult() },
-          onRunRedTeamCommand = { user, cmd ->
-            viewModel.runRedTeamCommand(user, cmd)
-          },
-          onClearMode1Result = { viewModel.clearMode1Result() },
-          onUpdateBranding = { name, primary, accent ->
-            viewModel.updateCompanyBranding(name, primary, accent)
-          },
-          onOpenDaemonSettings = { showDaemonDialog = true }
-        )
-        2 -> AdminSessionsScreen(
-          sessions = sessions,
-          onBlockMacConfirmed = { mac, devId -> viewModel.blockMacConfirmed(mac, devId) },
-          onUnblockMacConfirmed = { mac, devId -> viewModel.unblockMacConfirmed(mac, devId) }
-        )
-        3 -> BlueTeamReportScreen(
-          reportText = viewModel.generateAuditReport()
-        )
+      // Aviso persistente cuando no hay conexión con el daemon (caché obsoleta o vacía)
+      if (!isOnline) {
+        val lastSyncText = if (honeygateConfig.lastSyncedAtMs > 0L) {
+          val fmt = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date(honeygateConfig.lastSyncedAtMs))
+          "Sin conexión — mostrando caché local ($fmt)"
+        } else {
+          "Sin conexión con el daemon (${daemonStatus?.errorMessage ?: "configurá URL y token"})"
+        }
+
+        Surface(
+          color = RedGlow,
+          border = androidx.compose.foundation.BorderStroke(1.dp, AlertRed.copy(alpha = 0.6f)),
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 4.dp)
+            .clickable { showDaemonDialog = true }
+            .testTag("offline_cache_banner")
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              modifier = Modifier.weight(1f)
+            ) {
+              Icon(Icons.Default.CloudOff, contentDescription = "Sin conexión", tint = AlertRed, modifier = Modifier.size(15.dp))
+              Text(lastSyncText, fontSize = 10.sp, color = TextPrimary, maxLines = 2)
+            }
+            Text("Conectar", fontSize = 10.sp, color = CyberCyan, fontWeight = FontWeight.Bold)
+          }
+        }
+      }
+
+      if (daemonSyncMessage != null) {
+        Surface(
+          color = CyanGlow,
+          border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan.copy(alpha = 0.6f)),
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 2.dp)
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
+            Text(daemonSyncMessage ?: "", fontSize = 10.sp, color = CyberCyan, modifier = Modifier.weight(1f))
+            IconButton(onClick = { viewModel.clearDaemonMessage() }, modifier = Modifier.size(20.dp)) {
+              Icon(Icons.Default.Close, contentDescription = "Cerrar aviso", tint = CyberCyan, modifier = Modifier.size(14.dp))
+            }
+          }
+        }
+      }
+
+      Box(modifier = Modifier.fillMaxSize()) {
+        when (selectedTab) {
+          0 -> ForensicEventsScreen(
+            events = events,
+            selectedFilter = selectedFilter,
+            searchQuery = searchQuery,
+            blockedCount = blockedCount,
+            alertedCount = alertedCount,
+            normalCount = normalCount,
+            isOnline = isOnline,
+            onFilterSelected = { viewModel.setFilter(it) },
+            onSearchQueryChanged = { viewModel.setSearchQuery(it) },
+            onIsolateIpConfirmed = { ip, devId -> viewModel.isolateIpFromEventConfirmed(ip, devId) },
+            onDeleteEvent = { viewModel.clearAllEvents() },
+            onRefreshFromDaemon = { viewModel.syncDaemonData() }
+          )
+          1 -> HoneygateScreen(
+            config = honeygateConfig,
+            isOnline = isOnline,
+            mode1Result = mode1Result,
+            mode2Result = mode2Result,
+            otpChallenge = otpChallenge,
+            redTeamLogs = redTeamLogs,
+            escalationLevel = escalationLevel,
+            onSelectMode = { viewModel.setOperatingMode(it) },
+            onPushDaemonConfig = { viewModel.pushConfigToDaemon(it) },
+            onToggleDemoMode = { viewModel.toggleDemoMode(it) },
+            onRegisterDemoMode1 = { email, ip, mac -> viewModel.registerDemoMode1(email, ip, mac) },
+            onRequestDemoOtp = { email, ip, mac -> viewModel.requestDemoOtp(email, ip, mac) },
+            onVerifyDemoOtp = { code, ip, mac -> viewModel.verifyDemoOtpAndRegister(code, ip, mac) },
+            onDismissOtp = { viewModel.dismissOtpChallenge() },
+            onRunDemoRedTeamCommand = { user, cmd -> viewModel.runDemoRedTeamCommand(user, cmd) },
+            onClearMode1Result = { viewModel.clearMode1Result() },
+            onUpdateBranding = { name, primary, accent -> viewModel.updateCompanyBranding(name, primary, accent) },
+            onOpenDaemonSettings = { showDaemonDialog = true }
+          )
+          2 -> AdminSessionsScreen(
+            sessions = sessions,
+            isOnline = isOnline,
+            onIsolateConfirmed = { session -> viewModel.isolateOrUnblockSessionConfirmed(session, blocked = true) },
+            onUnblockConfirmed = { session -> viewModel.isolateOrUnblockSessionConfirmed(session, blocked = false) },
+            onObserveConfirmed = { session, reason -> viewModel.observeSessionConfirmed(session, reason) },
+            onRefreshFromDaemon = { viewModel.syncDaemonData() }
+          )
+          3 -> BlueTeamReportScreen(
+            reportText = viewModel.generateAuditReport()
+          )
+        }
       }
     }
   }
@@ -252,8 +309,9 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
       onCheckHealth = { viewModel.checkDaemonHealth() },
       onSyncData = { viewModel.syncDaemonData() },
       onUpdateConfig = { url, token, enabled ->
-        viewModel.updateDaemonConfig(url, token, enabled)
+        viewModel.updateDaemonConnectionConfig(url, token, enabled)
       },
+      onToggleDemoMode = { viewModel.toggleDemoMode(it) },
       onClearSyncMessage = { viewModel.clearDaemonMessage() }
     )
   }

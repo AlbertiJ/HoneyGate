@@ -2,7 +2,6 @@ package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -69,7 +68,7 @@ fun DaemonStatusBadge(
       }
 
       Text(
-        text = if (isOnline) "Daemon: ${daemonStatus?.latencyMs ?: 0}ms" else "Daemon: Offline",
+        text = if (isOnline) "Daemon: ${daemonStatus?.latencyMs ?: 0}ms" else "Sin conexión",
         fontSize = 10.sp,
         color = textColor,
         fontWeight = FontWeight.SemiBold
@@ -88,6 +87,7 @@ fun DaemonControlDialog(
   onCheckHealth: () -> Unit,
   onSyncData: () -> Unit,
   onUpdateConfig: (baseUrl: String, token: String, enabled: Boolean) -> Unit,
+  onToggleDemoMode: (Boolean) -> Unit,
   onClearSyncMessage: () -> Unit
 ) {
   var baseUrlInput by remember(config.daemonBaseUrl) { mutableStateOf(config.daemonBaseUrl) }
@@ -110,7 +110,6 @@ fun DaemonControlDialog(
           .fillMaxWidth()
           .padding(16.dp)
       ) {
-        // Encabezado
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween,
@@ -128,13 +127,13 @@ fun DaemonControlDialog(
             )
             Column {
               Text(
-                text = "Módulo 1: Conector Daemon Linux",
+                text = "Conector Daemon HoneyGate",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary
               )
               Text(
-                text = "Control Perimetral Remoto en Tiempo Real",
+                text = "Fuente única en SQLite (GET/PUT /api/*)",
                 fontSize = 10.sp,
                 color = TextSecondary
               )
@@ -150,7 +149,6 @@ fun DaemonControlDialog(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Indicador de Estado del Daemon
         val isOnline = daemonStatus?.online == true
         Surface(
           shape = RoundedCornerShape(10.dp),
@@ -175,7 +173,7 @@ fun DaemonControlDialog(
                     .background(if (isOnline) CyberGreen else AlertRed)
                 )
                 Text(
-                  text = if (isOnline) "DAEMON ACTIVO EN KERNEL LINUX" else "DAEMON DESCONECTADO",
+                  text = if (isOnline) "DAEMON CONECTADO (MODO ${daemonStatus?.mode ?: config.gateMode})" else "SIN CONEXIÓN CON EL DAEMON",
                   fontSize = 11.sp,
                   fontWeight = FontWeight.Bold,
                   color = if (isOnline) CyberGreen else AlertRed
@@ -217,7 +215,6 @@ fun DaemonControlDialog(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Campos de Configuración
         Text("Endpoint del Motor (Python / Kali / Host):", fontSize = 11.sp, color = TextSecondary)
         Spacer(modifier = Modifier.height(4.dp))
         OutlinedTextField(
@@ -271,15 +268,14 @@ fun DaemonControlDialog(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Toggle Sync
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically
         ) {
-          Column {
+          Column(modifier = Modifier.weight(1f)) {
             Text("Sincronización Perimetral Activa", fontSize = 11.sp, color = TextPrimary)
-            Text("Envía órdenes de kernel shutdown en bloqueos", fontSize = 9.sp, color = TextMuted)
+            Text("Consulta /api/config, /api/sessions y /api/events", fontSize = 9.sp, color = TextMuted)
           }
           Switch(
             checked = syncEnabled,
@@ -293,7 +289,30 @@ fun DaemonControlDialog(
           )
         }
 
-        // Mensaje de resultado de Sync
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Column(modifier = Modifier.weight(1f)) {
+            Text("Modo DEMO (pruebas locales)", fontSize = 11.sp, color = if (config.demoModeEnabled) WarningAmber else TextPrimary)
+            Text("Apagado por defecto. Al apagarlo limpia datos demo.", fontSize = 9.sp, color = TextMuted)
+          }
+          Switch(
+            checked = config.demoModeEnabled,
+            onCheckedChange = onToggleDemoMode,
+            modifier = Modifier.testTag("demo_mode_switch"),
+            colors = SwitchDefaults.colors(
+              checkedThumbColor = WarningAmber,
+              checkedTrackColor = AmberGlow,
+              uncheckedThumbColor = TextMuted,
+              uncheckedTrackColor = DarkSurface
+            )
+          )
+        }
+
         AnimatedVisibility(visible = syncMessage != null) {
           syncMessage?.let { msg ->
             Surface(
@@ -320,7 +339,6 @@ fun DaemonControlDialog(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Botones de Acción
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.spacedBy(8.dp)
