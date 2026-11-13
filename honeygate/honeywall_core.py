@@ -1,6 +1,6 @@
 """
 ================================================================================
-UNDAHWOAR HONEYWALL: Core Lógico de Red y Capa de Contención Perimetral
+HONEYGATE HONEYWALL: Core Lógico de Red y Capa de Contención Perimetral
 Framework de Decepción y Monitoreo Defensivo en Espacio de Usuario (Non-Root)
 Compatible con Kali Linux y entornos WSL2
 ================================================================================
@@ -67,12 +67,12 @@ class ConnectionSession:
         self.last_activity = now
         self.bytes_out += frame_size
         self.outbound_timestamps.append(now)
-        
+
         # Limpiar marcas de tiempo con antigüedad superior a 60 segundos
         cutoff = now - 60.0
         while self.outbound_timestamps and self.outbound_timestamps[0] < cutoff:
             self.outbound_timestamps.popleft()
-            
+
         return len(self.outbound_timestamps)
 
     def get_outbound_rate_per_minute(self) -> int:
@@ -84,9 +84,9 @@ class ConnectionSession:
         return len(self.outbound_timestamps)
 
 
-class UndahwoarHoneywall:
+class HoneyGateHoneywall:
     """
-    Controlador de Mitigación Perimetral (Undahwoar Honeywall).
+    Controlador de Mitigación Perimetral (HoneyGate Honeywall).
     Supervisa conexiones activas, detecta pivoteo/escaneos, ejecuta rate-limiting estricto
     y acciona desconexiones forzadas mediante llamadas al sistema nativas de Linux.
     """
@@ -139,11 +139,11 @@ class UndahwoarHoneywall:
         """
         with self._lock:
             mac = self.resolve_mac_address(client_ip)
-            
+
             # Si la IP ya estaba aislada por violaciones previas, expulsar de inmediato
             if client_ip in self.isolated_ips:
                 logger.warning(
-                    f"[UNDAHWOAR-DROP] Intento de conexión desde IP aislada: {client_ip}:{client_port} (MAC: {mac})."
+                    f"[HONEYGATE-DROP] Intento de conexión desde IP aislada: {client_ip}:{client_port} (MAC: {mac})."
                 )
                 self._force_disconnect_native(fd, sock, "IP en lista de aislamiento activo")
                 raise HoneywallSecurityException(f"IP {client_ip} aislada previamente")
@@ -187,18 +187,18 @@ class UndahwoarHoneywall:
                     f"(Máximo permitido: {self.MAX_OUTBOUND_PER_MINUTE}). Posible escaneo/pivoteo."
                 )
                 logger.error(
-                    f"[CRITICAL] [UNDAHWOAR-CONTAINMENT] IP={session.client_ip} (FD={fd}) -> {violation_msg}"
+                    f"[CRITICAL] [HONEYGATE-CONTAINMENT] IP={session.client_ip} (FD={fd}) -> {violation_msg}"
                 )
-                
+
                 # Aislar la IP globalmente
                 self.isolate_ip(
                     session.client_ip,
                     reason=f"Exceso de tasa saliente ({outbound_rate} tramas/min)"
                 )
-                
+
                 # Ejecutar desconexión forzada inmediata mediante syscalls nativas
                 self.terminate_session(fd, reason=violation_msg)
-                
+
                 if self.alert_callback:
                     self.alert_callback(
                         "Alerta Crítica Honeywall",
@@ -217,7 +217,7 @@ class UndahwoarHoneywall:
                 "reason": reason,
             }
             self.stats["isolated_count"] = len(self.isolated_ips)
-            logger.warning(f"[UNDAHWOAR-ISOLATE] IP {ip_address} agregada a lista de contención. Motivo: {reason}")
+            logger.warning(f"[HONEYGATE-ISOLATE] IP {ip_address} agregada a lista de contención. Motivo: {reason}")
 
             # Desconectar todas las conexiones abiertas por esta IP
             fds_to_close = [
@@ -233,7 +233,7 @@ class UndahwoarHoneywall:
             if ip_address in self.isolated_ips:
                 del self.isolated_ips[ip_address]
                 self.stats["isolated_count"] = len(self.isolated_ips)
-                logger.info(f"[UNDAHWOAR-UNBLOCK] IP {ip_address} desbloqueada satisfactoriamente.")
+                logger.info(f"[HONEYGATE-UNBLOCK] IP {ip_address} desbloqueada satisfactoriamente.")
                 return True
             return False
 
@@ -310,7 +310,7 @@ class EpollNetworkEngine:
     Motor de E/S Asíncrona de Bajo Nivel basado en select.epoll con Edge-Triggered (EPOLLET).
     Gestiona servidores no bloqueantes en puertos altos (>1024) en espacio de usuario.
     """
-    def __init__(self, ports: List[int], honeywall: UndahwoarHoneywall):
+    def __init__(self, ports: List[int], honeywall: HoneyGateHoneywall):
         self.ports = ports
         self.honeywall = honeywall
         self.epoll = select.epoll()
@@ -339,7 +339,7 @@ class EpollNetworkEngine:
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_sock.bind(("0.0.0.0", port))
             server_sock.listen(128)
-            
+
             # Aplicar O_NONBLOCK con fcntl
             self.set_socket_nonblocking(server_sock)
 
@@ -400,7 +400,7 @@ class EpollNetworkEngine:
         while True:
             try:
                 client_sock, (client_ip, client_port) = server_sock.accept()
-            except (BlockingIOError, socket.error) as e:
+            except (BlockingIOError, socket.error):
                 # En modo Edge-Triggered, EAGAIN / EWOULDBLOCK indica que no quedan conexiones pendientes
                 break
 
@@ -418,8 +418,8 @@ class EpollNetworkEngine:
                     select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
                 )
 
-                # Enviar banner de bienvenida engañoso (Honeypot Deception Banner)
-                banner = f"SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2 (Undahwoar Deception Emulated)\r\n"
+                # Enviar banner SSH estándar realista (sin revelar señuelo)
+                banner = "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2\r\n"
                 try:
                     client_sock.send(banner.encode("utf-8"))
                     # Evaluar tráfico de salida en Honeywall
@@ -452,7 +452,7 @@ class EpollNetworkEngine:
                 self.honeywall.stats["bytes_in_total"] += len(data)
                 session.last_activity = time.time()
 
-                # Simular respuesta de servicio de decepción (Interactive Deception Echo)
+                # Simular respuesta de servicio realista
                 response = self._generate_deception_response(session, data)
                 if response:
                     # Evaluar si la trama saliente respeta el umbral de contención perimetral
@@ -515,28 +515,29 @@ class EpollNetworkEngine:
         """Genera respuestas simuladas realistas para interactuar con atacantes o escáneres."""
         text = raw_data.decode("utf-8", errors="ignore").strip()
         logger.debug(f"[DECEPTION-PAYLOAD] IP={session.client_ip}:{session.client_port} -> {text!r}")
-        
+
         # Simulación de respuesta a escaneos o peticiones HTTP/SSH
         if text.startswith("GET ") or text.startswith("POST "):
+            body = b"Apache/2.4.57 (Debian) Server Active\n"
             return (
                 b"HTTP/1.1 200 OK\r\n"
                 b"Server: Apache/2.4.57 (Debian)\r\n"
                 b"Content-Type: text/plain\r\n"
-                b"Content-Length: 26\r\n\r\n"
-                b"Undahwoar Honeypot Active\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
             )
         elif "id" in text or "whoami" in text:
             return b"uid=1001(guest) gid=1001(guest) groups=1001(guest)\r\n"
         elif "uname" in text:
             return b"Linux kali-lab 6.6.9-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\r\n"
         else:
-            return b"Access denied. Undahwoar security monitoring in progress.\r\n"
+            return b"Access denied. HoneyGate security monitoring in progress.\r\n"
 
     def start_background(self) -> threading.Thread:
         """Inicia el motor de red en un hilo separado de forma asíncrona."""
         self.server_thread = threading.Thread(
             target=self.run_event_loop,
-            name="UndahwoarEpollThread",
+            name="HoneyGateEpollThread",
             daemon=True
         )
         self.server_thread.start()

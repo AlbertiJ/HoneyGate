@@ -44,10 +44,18 @@ data class DaemonAlert(
 class HoneyGateDaemonClient {
 
   /**
-   * Consulta el estado de salud del Daemon en Linux (GET /api/status).
+   * Consulta el estado de salud del Daemon en Linux (GET /api/status) enviando X-Auth-Token.
    */
-  suspend fun checkHealth(baseUrl: String): DaemonStatus = withContext(Dispatchers.IO) {
+  suspend fun checkHealth(baseUrl: String, token: String): DaemonStatus = withContext(Dispatchers.IO) {
     val cleanUrl = baseUrl.trimEnd('/')
+    if (token.isBlank()) {
+      return@withContext DaemonStatus(
+        online = false,
+        hostUrl = cleanUrl,
+        errorMessage = "Configurá el token"
+      )
+    }
+
     val start = System.currentTimeMillis()
     var connection: HttpURLConnection? = null
     try {
@@ -57,6 +65,7 @@ class HoneyGateDaemonClient {
         connectTimeout = 3000
         readTimeout = 3000
         setRequestProperty("Accept", "application/json")
+        setRequestProperty("X-Auth-Token", token)
       }
 
       val code = connection.responseCode
@@ -82,6 +91,12 @@ class HoneyGateDaemonClient {
           bytesInTotal = stats.optLong("bytes_in_total", 0L),
           bytesOutTotal = stats.optLong("bytes_out_total", 0L)
         )
+      } else if (code == 401) {
+        DaemonStatus(
+          online = false,
+          hostUrl = cleanUrl,
+          errorMessage = "401 No Autorizado: Cabecera X-Auth-Token inválida"
+        )
       } else {
         DaemonStatus(
           online = false,
@@ -101,9 +116,12 @@ class HoneyGateDaemonClient {
   }
 
   /**
-   * Obtiene la lista de conexiones activas desde el kernel Linux (GET /api/connections).
+   * Obtiene la lista de conexiones activas desde el kernel Linux (GET /api/connections) enviando X-Auth-Token.
    */
-  suspend fun getActiveSessions(baseUrl: String): Result<List<DaemonSession>> = withContext(Dispatchers.IO) {
+  suspend fun getActiveSessions(baseUrl: String, token: String): Result<List<DaemonSession>> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
     val cleanUrl = baseUrl.trimEnd('/')
     var connection: HttpURLConnection? = null
     try {
@@ -113,9 +131,11 @@ class HoneyGateDaemonClient {
         connectTimeout = 3000
         readTimeout = 3000
         setRequestProperty("Accept", "application/json")
+        setRequestProperty("X-Auth-Token", token)
       }
 
-      if (connection.responseCode == 200) {
+      val code = connection.responseCode
+      if (code == 200) {
         val reader = BufferedReader(InputStreamReader(connection.inputStream))
         val body = reader.readText()
         reader.close()
@@ -138,8 +158,10 @@ class HoneyGateDaemonClient {
           )
         }
         Result.success(list)
+      } else if (code == 401) {
+        Result.failure(Exception("401 No Autorizado: Cabecera X-Auth-Token inválida"))
       } else {
-        Result.failure(Exception("HTTP ${connection.responseCode} al consultar sesiones"))
+        Result.failure(Exception("HTTP $code al consultar sesiones"))
       }
     } catch (e: Exception) {
       Result.failure(e)
@@ -149,9 +171,12 @@ class HoneyGateDaemonClient {
   }
 
   /**
-   * Obtiene alertas forenses capturadas por inotify (GET /api/alerts).
+   * Obtiene alertas forenses capturadas por inotify (GET /api/alerts) enviando X-Auth-Token.
    */
-  suspend fun getAlerts(baseUrl: String): Result<List<DaemonAlert>> = withContext(Dispatchers.IO) {
+  suspend fun getAlerts(baseUrl: String, token: String): Result<List<DaemonAlert>> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
     val cleanUrl = baseUrl.trimEnd('/')
     var connection: HttpURLConnection? = null
     try {
@@ -161,9 +186,11 @@ class HoneyGateDaemonClient {
         connectTimeout = 3000
         readTimeout = 3000
         setRequestProperty("Accept", "application/json")
+        setRequestProperty("X-Auth-Token", token)
       }
 
-      if (connection.responseCode == 200) {
+      val code = connection.responseCode
+      if (code == 200) {
         val reader = BufferedReader(InputStreamReader(connection.inputStream))
         val body = reader.readText()
         reader.close()
@@ -182,8 +209,10 @@ class HoneyGateDaemonClient {
           )
         }
         Result.success(list)
+      } else if (code == 401) {
+        Result.failure(Exception("401 No Autorizado: Cabecera X-Auth-Token inválida"))
       } else {
-        Result.failure(Exception("HTTP ${connection.responseCode} al consultar alertas"))
+        Result.failure(Exception("HTTP $code al consultar alertas"))
       }
     } catch (e: Exception) {
       Result.failure(e)
@@ -201,6 +230,9 @@ class HoneyGateDaemonClient {
     ip: String,
     reason: String = "Aislamiento manual ordenado desde HoneyGate Android"
   ): Result<String> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
     val cleanUrl = baseUrl.trimEnd('/')
     var connection: HttpURLConnection? = null
     try {
@@ -247,6 +279,9 @@ class HoneyGateDaemonClient {
     token: String,
     ip: String
   ): Result<String> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
     val cleanUrl = baseUrl.trimEnd('/')
     var connection: HttpURLConnection? = null
     try {

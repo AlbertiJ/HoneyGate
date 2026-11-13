@@ -223,7 +223,7 @@ fun DaemonControlDialog(
         OutlinedTextField(
           value = baseUrlInput,
           onValueChange = { baseUrlInput = it },
-          placeholder = { Text("http://10.0.2.2:8888 o http://192.168.1.X:8888", fontSize = 11.sp) },
+          placeholder = { Text("http://10.0.2.2:8888 o http://127.0.0.1:8888", fontSize = 11.sp) },
           singleLine = true,
           modifier = Modifier
             .fillMaxWidth()

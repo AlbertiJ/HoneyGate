@@ -121,19 +121,37 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun checkDaemonHealth() {
     viewModelScope.launch {
-      val config = honeygateConfig.value
+      val config = repository.getConfigOnce() ?: honeygateConfig.value
       val baseUrl = config.daemonBaseUrl.ifBlank { "http://10.0.2.2:8888" }
-      val status = repository.checkDaemonHealth(baseUrl)
+      val token = config.daemonAuthToken.trim()
+      if (token.isEmpty()) {
+        _daemonStatus.value = DaemonStatus(
+          online = false,
+          hostUrl = baseUrl,
+          errorMessage = "Configurá el token"
+        )
+        return@launch
+      }
+      val status = repository.checkDaemonHealth(baseUrl, token)
       _daemonStatus.value = status
     }
   }
 
   fun syncDaemonData() {
     viewModelScope.launch {
-      _isSyncingDaemon.value = true
-      val config = honeygateConfig.value
+      val config = repository.getConfigOnce() ?: honeygateConfig.value
       val baseUrl = config.daemonBaseUrl.ifBlank { "http://10.0.2.2:8888" }
-      val token = config.daemonAuthToken.ifBlank { "hg_sec_token_9981" }
+      val token = config.daemonAuthToken.trim()
+      if (token.isEmpty()) {
+        _daemonSyncMessage.value = "Configurá el token"
+        _daemonStatus.value = DaemonStatus(
+          online = false,
+          hostUrl = baseUrl,
+          errorMessage = "Configurá el token"
+        )
+        return@launch
+      }
+      _isSyncingDaemon.value = true
       val result = repository.syncWithDaemon(baseUrl, token)
       _isSyncingDaemon.value = false
       _daemonSyncMessage.value = result.fold(
@@ -141,21 +159,31 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
         onFailure = { "Error de sincronización: ${it.localizedMessage}" }
       )
       // Actualizamos estado de salud tras el sync
-      val updatedStatus = repository.checkDaemonHealth(baseUrl)
+      val updatedStatus = repository.checkDaemonHealth(baseUrl, token)
       _daemonStatus.value = updatedStatus
     }
   }
 
   fun updateDaemonConfig(baseUrl: String, token: String, enabled: Boolean) {
     viewModelScope.launch {
-      val current = honeygateConfig.value
+      val current = repository.getConfigOnce() ?: honeygateConfig.value
+      val cleanUrl = baseUrl.trim()
+      val cleanToken = token.trim()
       val updated = current.copy(
-        daemonBaseUrl = baseUrl,
-        daemonAuthToken = token,
+        daemonBaseUrl = cleanUrl,
+        daemonAuthToken = cleanToken,
         daemonSyncEnabled = enabled
       )
       repository.saveHoneygateConfig(updated)
-      val status = repository.checkDaemonHealth(baseUrl)
+      if (cleanToken.isEmpty()) {
+        _daemonStatus.value = DaemonStatus(
+          online = false,
+          hostUrl = cleanUrl,
+          errorMessage = "Configurá el token"
+        )
+        return@launch
+      }
+      val status = repository.checkDaemonHealth(cleanUrl, cleanToken)
       _daemonStatus.value = status
     }
   }

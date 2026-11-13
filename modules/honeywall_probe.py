@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Módulo de Laboratorio: Prueba de Contención Perimetral y Rate-Limiter Undahwoar.
+Módulo de Laboratorio: Prueba de Contención Perimetral y Rate-Limiter HoneyGate.
 Emite intencionalmente más de 10 peticiones salientes por minuto para verificar
 que el Honeywall ejecuta el shutdown(SHUT_RDWR), cierra el socket y aísla la IP.
 """

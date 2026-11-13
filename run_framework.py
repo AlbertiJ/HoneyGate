@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-UNDAHWOAR HONEYWALL: Framework Unificado de Decepción y Contención Perimetral
+HONEYGATE HONEYWALL: Framework Unificado de Decepción y Contención Perimetral
 Lanzador Principal Integrado (Epoll Core + Honeywall + CLI + inotify + Web API)
 ================================================================================
 """
@@ -12,10 +12,10 @@ import time
 import signal
 import logging
 
-from undahwoar.honeywall_core import UndahwoarHoneywall, EpollNetworkEngine
-from undahwoar.cli_console import InteractiveCLI
-from undahwoar.forensic_monitor import ForensicAlertManager, DesktopNotificationDispatcher
-from undahwoar.dashboard_api import AsyncDashboardServer
+from honeygate.honeywall_core import HoneyGateHoneywall, EpollNetworkEngine
+from honeygate.cli_console import InteractiveCLI
+from honeygate.forensic_monitor import ForensicAlertManager, DesktopNotificationDispatcher
+from honeygate.dashboard_api import AsyncDashboardServer
 
 logger = logging.getLogger("HoneyGateMain")
 
@@ -31,7 +31,7 @@ def main():
     def on_honeywall_alert(title: str, message: str, urgency: str):
         DesktopNotificationDispatcher.dispatch(title, message, urgency)
 
-    honeywall = UndahwoarHoneywall(alert_callback=on_honeywall_alert)
+    honeywall = HoneyGateHoneywall(alert_callback=on_honeywall_alert)
 
     # 2. Inicializar Motor de Sockets epoll en Puertos Altos (>1024)
     # 2222 (SSH Simulado), 8080 (HTTP Simulado), 8443 (HTTPS Simulado)
@@ -70,7 +70,7 @@ def main():
     except KeyboardInterrupt:
         handle_shutdown(None, None)
 
-    print("\033[1;32m[+] Framework Undahwoar finalizado correctamente.\033[0m")
+    print("\033[1;32m[+] Framework HoneyGate finalizado correctamente.\033[0m")
 
 
 if __name__ == "__main__":

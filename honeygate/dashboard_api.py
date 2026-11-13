@@ -8,22 +8,18 @@ Seguridad Reforzada: Anti-XSS, Validación de IPs con ipaddress, Auth Tokens y L
 
 import os
 import json
-import time
 import secrets
 import logging
 import threading
 import ipaddress
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-from undahwoar.honeywall_core import UndahwoarHoneywall
-from undahwoar.forensic_monitor import ForensicAlertManager
+from honeygate.honeywall_core import HoneyGateHoneywall
+from honeygate.forensic_monitor import ForensicAlertManager
 
 logger = logging.getLogger("HoneyGateAPI")
-
-# Token de autenticación para endpoints administrativos de mutación
-HONEYGATE_AUTH_TOKEN = os.environ.get("HONEYGATE_API_TOKEN") or os.environ.get("HONEYGATE_AUTH_TOKEN") or "hg_sec_token_9981"
 
 
 HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
@@ -194,9 +190,12 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 
         async function fetchMetrics() {
             try {
-                const res = await fetch('/api/status');
+                const res = await fetch('/api/status', {
+                    headers: { 'X-Auth-Token': AUTH_TOKEN }
+                });
+                if (!res.ok) return;
                 const data = await res.json();
-                
+
                 document.getElementById('val-active').textContent = data.active_sessions.length;
                 document.getElementById('val-total').textContent = data.stats.total_connections;
                 document.getElementById('val-isolated').textContent = Object.keys(data.isolated_ips).length;
@@ -262,7 +261,10 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 // Cargar alertas sanitizado (Anti-XSS con textContent)
-                const alertRes = await fetch('/api/alerts');
+                const alertRes = await fetch('/api/alerts', {
+                    headers: { 'X-Auth-Token': AUTH_TOKEN }
+                });
+                if (!alertRes.ok) return;
                 const alerts = await alertRes.json();
                 document.getElementById('alert-counter').textContent = alerts.length;
                 const alertContainer = document.getElementById('alerts-container');
@@ -336,15 +338,26 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
     """
     Manejador HTTP ligero y concurrente para los endpoints REST JSON y el dashboard web.
-    Implementa validación estricta de IPs y tokens de autenticación para mutaciones.
+    Implementa validación estricta de IPs y autenticación obligatoria con X-Auth-Token
+    en todos los endpoints /api/* (falla cerrada con 401 si no hay token configurado).
     """
-    honeywall: UndahwoarHoneywall = None
+    honeywall: HoneyGateHoneywall = None
     forensics: ForensicAlertManager = None
     auth_token: Optional[str] = None
 
     def log_message(self, format, *args):
         # Suprimir logs HTTP verbosos en stdout para mantener la terminal limpia
         pass
+
+    def _is_authorized(self) -> bool:
+        """Valida X-Auth-Token con comparación en tiempo constante. Falla cerrado si no hay token."""
+        expected = self.auth_token
+        if not expected:
+            return False
+        token = self.headers.get("X-Auth-Token", "")
+        if not token:
+            return False
+        return secrets.compare_digest(token, expected)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -354,23 +367,32 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            # Inyectar token de autenticación de forma segura para las llamadas del front-end local
-            token = self.auth_token or HONEYGATE_AUTH_TOKEN
+            token = self.auth_token or ""
             rendered = HTML_DASHBOARD_TEMPLATE.replace("__API_TOKEN__", token).replace("HONEYGATE_AUTH_TOKEN_VALUE", token)
             self.wfile.write(rendered.encode("utf-8"))
+            return
 
-        elif path == "/api/status" or path == "/api/honeywall":
-            snapshot = self.honeywall.get_snapshot()
-            self._send_json(snapshot, allow_cors=True)
+        if path.startswith("/api/"):
+            if not self._is_authorized():
+                logger.warning(f"[AUTH-DENIED] Intento de acceso GET sin token válido a {path}")
+                self._send_json({"error": "Unauthorized: Invalid or missing X-Auth-Token"}, status_code=401)
+                return
 
-        elif path == "/api/connections":
-            snapshot = self.honeywall.get_snapshot()
-            self._send_json(snapshot["active_sessions"], allow_cors=True)
+            if path == "/api/status" or path == "/api/honeywall":
+                snapshot = self.honeywall.get_snapshot()
+                self._send_json(snapshot)
 
-        elif path == "/api/alerts":
-            alerts = self.forensics.get_recent_alerts(limit=50) if self.forensics else []
-            self._send_json(alerts, allow_cors=True)
+            elif path == "/api/connections":
+                snapshot = self.honeywall.get_snapshot()
+                self._send_json(snapshot["active_sessions"])
 
+            elif path == "/api/alerts":
+                alerts = self.forensics.get_recent_alerts(limit=50) if self.forensics else []
+                self._send_json(alerts)
+
+            else:
+                self.send_response(404)
+                self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -379,13 +401,10 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        # 1. Verificación obligatoria de X-Auth-Token con compare_digest para endpoints administrativos
-        if path in ("/api/isolate", "/api/unblock"):
-            token = self.headers.get("X-Auth-Token", "")
-            expected = self.auth_token or HONEYGATE_AUTH_TOKEN
-            if not token or not secrets.compare_digest(token, expected):
-                logger.warning(f"[AUTH-DENIED] Intento de acceso sin token válido a {path}")
-                self._send_json({"error": "Unauthorized: Invalid or missing X-Auth-Token"}, status_code=401, allow_cors=False)
+        if path.startswith("/api/"):
+            if not self._is_authorized():
+                logger.warning(f"[AUTH-DENIED] Intento de acceso POST sin token válido a {path}")
+                self._send_json({"error": "Unauthorized: Invalid or missing X-Auth-Token"}, status_code=401)
                 return
 
         content_length = int(self.headers.get("Content-Length", 0))
@@ -400,9 +419,9 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
             raw_ip = payload.get("ip")
             reason = payload.get("reason", "Aislamiento manual API")
 
-            # 2. Validación estricta de IP con ipaddress
+            # Validación estricta de IP con ipaddress
             if not raw_ip:
-                self._send_json({"error": "Falta parámetro 'ip'"}, status_code=400, allow_cors=False)
+                self._send_json({"error": "Falta parámetro 'ip'"}, status_code=400)
                 return
 
             try:
@@ -410,16 +429,16 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
                 validated_ip = str(ip_obj)
             except ValueError:
                 logger.warning(f"[SECURITY-DROP] Rechazada IP malformada en /api/isolate: {raw_ip}")
-                self._send_json({"error": "Dirección IP inválida"}, status_code=400, allow_cors=False)
+                self._send_json({"error": "Dirección IP inválida"}, status_code=400)
                 return
 
             self.honeywall.isolate_ip(validated_ip, reason=reason)
-            self._send_json({"status": "success", "isolated_ip": validated_ip}, allow_cors=False)
+            self._send_json({"status": "success", "isolated_ip": validated_ip})
 
         elif path == "/api/unblock":
             raw_ip = payload.get("ip")
             if not raw_ip:
-                self._send_json({"error": "Falta parámetro 'ip'"}, status_code=400, allow_cors=False)
+                self._send_json({"error": "Falta parámetro 'ip'"}, status_code=400)
                 return
 
             # Validación estricta de IP con ipaddress
@@ -428,22 +447,20 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
                 validated_ip = str(ip_obj)
             except ValueError:
                 logger.warning(f"[SECURITY-DROP] Rechazada IP malformada en /api/unblock: {raw_ip}")
-                self._send_json({"error": "Dirección IP inválida"}, status_code=400, allow_cors=False)
+                self._send_json({"error": "Dirección IP inválida"}, status_code=400)
                 return
 
             unblocked = self.honeywall.unblock_ip(validated_ip)
-            self._send_json({"status": "success", "unblocked": unblocked, "ip": validated_ip}, allow_cors=False)
+            self._send_json({"status": "success", "unblocked": unblocked, "ip": validated_ip})
 
         else:
             self.send_response(404)
             self.end_headers()
 
-    def _send_json(self, data: Any, status_code: int = 200, allow_cors: bool = False):
+    def _send_json(self, data: Any, status_code: int = 200):
         body = json.dumps(data, indent=2).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        if allow_cors:
-            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -451,23 +468,43 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
 
 class AsyncDashboardServer:
     """Servidor web de telemetría forense para HoneyGate (escuchando por defecto en 127.0.0.1)."""
-    def __init__(self, honeywall: UndahwoarHoneywall, forensics: ForensicAlertManager, host: str = "127.0.0.1", port: int = 8888):
+    def __init__(self, honeywall: HoneyGateHoneywall, forensics: ForensicAlertManager, host: str = "127.0.0.1", port: int = 8888):
         self.host = host
         self.port = port
         self.honeywall = honeywall
         self.forensics = forensics
         self.httpd: Optional[HTTPServer] = None
         self.server_thread: Optional[threading.Thread] = None
+        env_token = os.environ.get("HONEYGATE_API_TOKEN", "").strip()
+        self._from_env = bool(env_token)
+        self.api_token: str = env_token if env_token else secrets.token_urlsafe(32)
+        self._token_logged = False
 
     def start_background(self) -> threading.Thread:
         """Inicia el servidor web en un hilo secundario."""
-        self.api_token = os.environ.get("HONEYGATE_API_TOKEN") or os.environ.get("HONEYGATE_AUTH_TOKEN") or HONEYGATE_AUTH_TOKEN
-        HoneyGateHTTPRequestHandler.honeywall = self.honeywall
-        HoneyGateHTTPRequestHandler.forensics = self.forensics
-        HoneyGateHTTPRequestHandler.auth_token = self.api_token
+        env_token = os.environ.get("HONEYGATE_API_TOKEN", "").strip()
+        if env_token:
+            self.api_token = env_token
+            self._from_env = True
+
+        if not self._token_logged:
+            if self._from_env:
+                logger.info("[WEB-API] Token X-Auth-Token cargado desde HONEYGATE_API_TOKEN.")
+            else:
+                logger.info(f"[WEB-API] HONEYGATE_API_TOKEN no definido; token generado para esta sesión: {self.api_token}")
+            self._token_logged = True
+
+        bound_honeywall = self.honeywall
+        bound_forensics = self.forensics
+        bound_token = self.api_token
+
+        class BoundHandler(HoneyGateHTTPRequestHandler):
+            honeywall = bound_honeywall
+            forensics = bound_forensics
+            auth_token = bound_token
 
         HTTPServer.allow_reuse_address = True
-        self.httpd = HTTPServer((self.host, self.port), HoneyGateHTTPRequestHandler)
+        self.httpd = HTTPServer((self.host, self.port), BoundHandler)
         logger.info(f"[WEB-API] Dashboard y Endpoints JSON activos en http://{self.host}:{self.port}")
 
         self.server_thread = threading.Thread(

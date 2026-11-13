@@ -2,24 +2,38 @@
 # ==============================================================================
 # 🛡️ HoneyGate - Script de Rollback Seguro y Restauración de Checkpoint
 # ==============================================================================
-# Permite volver de forma inmediata a un estado funcional anterior ante cualquier
-# anomalía, fallo de integración o prueba fallida.
+# Permite volver de forma inmediata a un commit o tag existente en Git ante
+# cualquier anomalía, fallo de integración o prueba fallida.
 #
-# Uso:
-#   ./rollback.sh                     (Restaura al tag v1.0.0-checkpoint por defecto)
-#   ./rollback.sh <COMMIT_HASH_O_TAG> (Restaura al hash o tag especificado)
-#   ./rollback.sh --hard              (Fuerza la restauración descartando cambios locales)
+# Uso obligatorio:
+#   ./rollback.sh <COMMIT_HASH_O_TAG>
+#   ./rollback.sh --hard <COMMIT_HASH_O_TAG>
 # ==============================================================================
 
 set -e
 
-TARGET="${1:-v1.0.0-claude-security}"
+usage() {
+    echo "Uso: $0 [--hard] <COMMIT_HASH_O_TAG>"
+    echo ""
+    echo "Argumento obligatorio:"
+    echo "  <COMMIT_HASH_O_TAG>   Hash de commit o etiqueta Git destino (ej: git log --oneline -n 5)"
+    echo "  --hard                (Opcional) Fuerza git reset --hard al objetivo"
+    exit 1
+}
+
+FORCE_HARD=false
+TARGET=""
 
 if [ "$1" == "--hard" ]; then
-    TARGET="${2:-v1.0.0-claude-security}"
     FORCE_HARD=true
+    TARGET="${2:-}"
 else
-    FORCE_HARD=false
+    TARGET="${1:-}"
+fi
+
+if [ -z "$TARGET" ]; then
+    echo "[-] Error: Debe especificar un commit o tag destino."
+    usage
 fi
 
 echo "======================================================================"
@@ -35,7 +49,13 @@ if [ ! -d ".git" ]; then
     exit 1
 fi
 
-# 2. Respaldo de seguridad preventivo si hay modificaciones pendientes
+# 2. Verificar existencia del commit/tag antes de modificar el árbol
+if ! git rev-parse --verify "$TARGET^{commit}" >/dev/null 2>&1; then
+    echo "[-] Error: El identificador '$TARGET' no existe en el historial de Git."
+    exit 1
+fi
+
+# 3. Respaldo de seguridad preventivo si hay modificaciones pendientes
 if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     STASH_NAME="backup_pre_rollback_$(date +%Y%m%d_%H%M%S)"
     echo "[!] Cambios pendientes detectados en el espacio de trabajo."
@@ -43,20 +63,14 @@ if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     git stash push -m "$STASH_NAME"
 fi
 
-# 3. Aplicar Rollback
+# 4. Aplicar Rollback
 if [ "$FORCE_HARD" = true ]; then
     echo "[+] Ejecutando git reset --hard $TARGET ..."
     git reset --hard "$TARGET"
 else
-    echo "[+] Comprobando existencia de tag/commit: $TARGET ..."
-    if git rev-parse "$TARGET" >/dev/null 2>&1; then
-        echo "[+] Restaurando archivos al estado de $TARGET..."
-        git checkout "$TARGET" -- .
-        echo "[+] Archivos sincronizados con éxito a: $TARGET"
-    else
-        echo "[-] Error: El identificador '$TARGET' no existe en el historial de Git."
-        exit 1
-    fi
+    echo "[+] Restaurando archivos al estado de $TARGET..."
+    git checkout "$TARGET" -- .
+    echo "[+] Archivos sincronizados con éxito a: $TARGET"
 fi
 
 echo ""

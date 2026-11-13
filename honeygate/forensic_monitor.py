@@ -1,6 +1,6 @@
 """
 ================================================================================
-UNDAHWOAR FORENSICS: Subsistema de Monitoreo Basado en Eventos inotify y Alertas
+HONEYGATE FORENSICS: Subsistema de Monitoreo Basado en Eventos inotify y Alertas
 Llamadas Nativas al Kernel de Linux vía ctypes | Expresiones Regulares | notify-send
 ================================================================================
 """
@@ -18,7 +18,7 @@ import threading
 import subprocess
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
-logger = logging.getLogger("UndahwoarForensics")
+logger = logging.getLogger("HoneyGateForensics")
 
 # Constantes del Kernel de Linux para inotify (definidas en <sys/inotify.h>)
 IN_MODIFY = 0x00000002       # Archivo fue modificado
@@ -132,7 +132,7 @@ class DesktopNotificationDispatcher:
             cmd = [
                 "notify-send",
                 "-u", urgency,
-                "-a", "Undahwoar Honeywall",
+                "-a", "HoneyGate Honeywall",
                 "-i", icon,
                 title,
                 message,
@@ -168,7 +168,7 @@ class ForensicAlertManager:
         re.IGNORECASE
     )
     RE_HONEYWALL_CONTAINMENT = re.compile(
-        r"\[CRITICAL\] \[UNDAHWOAR-CONTAINMENT\] IP=(?P<ip>\S+) .*? (?P<reason>.*)",
+        r"\[CRITICAL\] \[HONEYGATE-CONTAINMENT\] IP=(?P<ip>\S+) .*? (?P<reason>.*)",
         re.IGNORECASE
     )
 
@@ -202,7 +202,7 @@ class ForensicAlertManager:
         self.is_running = True
         self.monitor_thread = threading.Thread(
             target=self._run_inotify_loop,
-            name="UndahwoarForensicsThread",
+            name="HoneyGateForensicsThread",
             daemon=True
         )
         self.monitor_thread.start()
@@ -348,7 +348,7 @@ class ForensicAlertManager:
                 self.alerts_history.pop(0)
 
         logger.warning(f"[FORENSIC-TRIGGER] [{severity.upper()}] {title}: {message}")
-        
+
         # Despachar notificación gráfica con notify-send
         DesktopNotificationDispatcher.dispatch(
             title=title,

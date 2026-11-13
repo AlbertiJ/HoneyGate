@@ -1,5 +1,5 @@
 """
-Undahwoar Honeywall & Deception Defense Framework
+HoneyGate Honeywall & Deception Defense Framework
 Non-Root User-Space Perimeter Containment & Forensic Telemetry for Kali Linux / WSL2
 """
 

@@ -104,7 +104,8 @@ El núcleo de red corre en espacio de usuario en Kali Linux o WSL2:
 * **Vigilancia Forense con `inotify` de Kernel (`libc.so.6`)**: Monitoreo reactivo de bitácoras sin sondeo continuo de disco, enlazado directamente con llamadas nativas de C vía `ctypes`.
 * **Seguridad Reforzada en la API Web**:
   * Enlace por defecto a `127.0.0.1`.
-  * Validación obligatoria de tokens en cabecera `X-Auth-Token` para acciones destructivas (`/api/isolate`, `/api/unblock`), devolviendo `401 Unauthorized` ante solicitudes no autenticadas.
+  * Validación obligatoria de token en cabecera `X-Auth-Token` (`secrets.compare_digest`) en **todos** los endpoints `/api/*` (GET y POST), devolviendo `401 Unauthorized` ante solicitudes no autenticadas o sin token configurado (falla cerrada). El token se lee de `HONEYGATE_API_TOKEN` o se genera efímeramente en cada arranque con `secrets.token_urlsafe(32)`.
+  * Sin cabecera `Access-Control-Allow-Origin: *`.
   * Verificación estricta de direcciones IP con el módulo `ipaddress`.
   * Sanitización contra XSS en el panel web (sustitución de `innerHTML` por asignaciones seguras de `textContent` y escape de entidades HTML).
 
@@ -112,7 +113,7 @@ El núcleo de red corre en espacio de usuario en Kali Linux o WSL2:
 
 ## 🔌 Módulo 1 — Conector Live App Android & Daemon Linux (Control Perimetral Remoto)
 
-El **Módulo 1** establece el puente de comando, telemetría y control perimetral bidireccional en tiempo real entre la aplicación Android y el Daemon de HoneyGate corriendo en Linux (Kali, WSL2 o servidor remoto):
+El **Módulo 1** establece el puente de comando, telemetría y control perimetral bidireccional en tiempo real entre la aplicación Android y el Daemon de HoneyGate corriendo en Linux (Kali o WSL2):
 
 ```
 ┌─────────────────────────────────┐                 ┌───────────────────────────────────┐
@@ -120,7 +121,7 @@ El **Módulo 1** establece el puente de comando, telemetría y control perimetra
 │                                 │                 │    (Python 3.11 epoll + ctypes)   │
 │  [TopAppBar Status Badge]       │   HTTP REST     │                                   │
 │  [DaemonControlDialog]          │ ──────────────> │  GET  /api/status                 │
-│  * Latencia de red              │   (Header:      │  GET  /api/connections           │
+│  * Latencia de red              │   (Header:      │  GET  /api/connections            │
 │  * Sockets activos en kernel    │    X-Auth-Token)│  GET  /api/alerts                 │
 │  * Ingesta a Room Database      │ <────────────── │                                   │
 │                                 │                 │                                   │
@@ -133,23 +134,28 @@ El **Módulo 1** establece el puente de comando, telemetría y control perimetra
 
 ### Características Clave del Módulo 1:
 1. **Comprobación de Salud y Latencia (`GET /api/status`)**:
-   * Reporta en vivo el estado del servicio, latencia en milisegundos, conteo de sockets de red activos, total de conexiones atendidas, violaciones de tasa de salida (*rate-limit*) e IPs actualmente aisladas.
+   * Reporta en vivo el estado del servicio, latencia en milisegundos, conteo de sockets de red activos, total de conexiones atendidas, violaciones de tasa de salida (*rate-limit*) e IPs actualmente aisladas. Requiere `X-Auth-Token`.
 2. **Sincronización de Telemetría a Room (`GET /api/connections` y `GET /api/alerts`)**:
    * Las sesiones activas en el bucle epoll son ingestadas directamente a `MonitoredSessionEntity` con cálculo dinámico del `device_id` compuesto.
    * Las alertas forenses de kernel (*inotify*) se almacenan automáticamente en `ForensicEvent` para correlación defensiva y generación de reportes.
+   * La base Room (`honeygate_security.db`) está excluida de respaldos en `backup_rules.xml` y `data_extraction_rules.xml` para proteger el token almacenado.
 3. **Mitigación Perimetral Remota a Nivel de Kernel (`POST /api/isolate` / `POST /api/unblock`)**:
-   * Al confirmar un bloqueo en el panel Android (cumpliendo el **Invariante 5**), se despacha una orden autenticada con `X-Auth-Token`.
+   * Al confirmar un bloqueo en el panel Android (cumpliendo el **Invariante 5**), se despacha una orden autenticada con `X-Auth-Token` (si el token está vacío en la app, no se contacta al daemon y se solicita configurarlo).
    * El Daemon en Linux localiza el descriptor de socket (`fd`) asociado y ejecuta inmediatamente la llamada al sistema nativa `shutdown(socket_fd, SHUT_RDWR)`, cerrando físicamente la conexión del atacante.
-4. **Configuración Dinámica y Tolerancia de Red**:
-   * Endpoint configurable desde la app: por defecto `http://10.0.2.2:8888` en emulador Android o la IP local/LAN del host Kali (`http://192.168.1.X:8888`).
-   * Permisos de red declarados (`INTERNET`, `ACCESS_NETWORK_STATE`, `usesCleartextTraffic="true"`).
+4. **Conectividad Segura (Emulador y Celular Físico por Túnel ADB)**:
+   * `network_security_config.xml` prohíbe tráfico HTTP en claro de forma global y lo habilita **únicamente** hacia `127.0.0.1` y `10.0.2.2`.
+   * **Emulador Android**: usar `http://10.0.2.2:8888`.
+   * **Celular físico por USB**: abrir túnel inverso hacia el daemon local en `127.0.0.1:8888` y configurar `http://127.0.0.1:8888` en la app:
+     ```bash
+     adb reverse tcp:8888 tcp:8888
+     ```
 
 ---
 
 ## 📁 Estructura del Repositorio
 
 ```text
-├── undahwoar/                 # Núcleo de red y decepción en Python
+├── honeygate/                 # Núcleo de red y decepción en Python
 │   ├── __init__.py            # Inicializador de paquete
 │   ├── honeywall_core.py      # Bucle epoll Edge-Triggered, Honeywall y Rate Limiter
 │   ├── cli_console.py         # Consola táctica interactiva con autocompletado en tiempo real
@@ -160,12 +166,14 @@ El **Módulo 1** establece el puente de comando, telemetría y control perimetra
 ├── app/                       # Aplicación Android (Jetpack Compose & Room Database)
 │   ├── src/main/java/com/example/
 │   │   ├── data/local/        # Entidades Room (ForensicEvent, MonitoredSession, HoneygateConfig)
+│   │   ├── data/remote/       # Cliente REST HoneyGateDaemonClient (X-Auth-Token)
 │   │   ├── data/repository/   # Lógica de invariantes, Anti-Sybil y correlación
+│   │   ├── ui/components/     # Insignia y diálogo de control del Daemon Linux
 │   │   ├── ui/screens/        # Pantallas: LazyColumn forense, Honeygate 3 Modos, Sesiones, Blue Team Report
 │   │   └── ui/theme/          # Sistema de diseño Eye-Care M3
 ├── REGLAS_DEL_PROYECTO.md     # Normas fundamentales y directrices de desarrollo
 ├── run_framework.py           # Lanzador unificado del backend defensivo
-├── test_undahwoar.py          # Batería de pruebas automatizadas de integración
+├── test_honeygate.py          # Batería de pruebas automatizadas de integración y seguridad
 └── requirements.txt           # Dependencias Python
 ```
 
@@ -179,15 +187,18 @@ El **Módulo 1** establece el puente de comando, telemetría y control perimetra
 # Instalar dependencias opcionales
 pip install -r requirements.txt
 
-# Ejecutar las pruebas automatizadas del motor defensivo
-python3 test_undahwoar.py
+# Ejecutar las pruebas automatizadas del motor defensivo y seguridad
+python3 test_honeygate.py
+
+# (Opcional) Definir un token propio para el daemon; si se omite, se genera uno efímero por arranque
+export HONEYGATE_API_TOKEN="tu_token_seguro"
 
 # Iniciar el framework completo (CLI interactiva + Servidor Web en 127.0.0.1:8888)
 python3 run_framework.py
 ```
 
 * **Consola Interactiva**: Disponible de inmediato en la terminal con comandos `status`, `honeywall-stats`, `isolate <ip>`, `unblock <ip>`.
-* **API y Dashboard**: Accesible localmente en `http://127.0.0.1:8888`.
+* **API y Dashboard**: Accesible localmente en `http://127.0.0.1:8888`. Para conectar un teléfono físico vía USB, ejecutá `adb reverse tcp:8888 tcp:8888` y apuntá la app a `http://127.0.0.1:8888` con el token configurado.
 
 ### 2. Ejecución y Compilación de la Aplicación Android
 
@@ -205,44 +216,17 @@ gradle :app:testDebugUnitTest
 
 ## 🔄 Procedimiento de Rollback y Control de Versiones
 
-Para garantizar la estabilidad operacional y permitir revertir cualquier cambio ante incidencias en auditorías o producción, HoneyGate cuenta con puntos de restauración etiquetados (*checkpoints*) y un script automatizado:
-
-### 1. Tag de Restauración Estable (Checkpoint)
-* **Tag Actual**: `v1.0.0-checkpoint`
-* **Commit Base**: `e7ec5d6` (*"feat(honeygate): mejoras en UI/UX, barra tactica, validacion OTP, auditoria SQLi y branding corporativo"*)
-
-### 2. Ejecutar Rollback Automático
-Se incluye el script `rollback.sh` para volver al estado estable con respaldo previo automático (`git stash`):
+Para revertir cambios ante incidencias, se incluye el script `rollback.sh` que exige especificar explícitamente el commit o etiqueta destino (realizando respaldo automático con `git stash` si hay cambios pendientes):
 
 ```bash
-# Restaurar al punto v1.0.0-checkpoint
-./rollback.sh
+# Consultar historial reciente para elegir el destino
+git log --oneline -n 5
 
-# Restaurar forzando descarte de cambios locales no confirmados
-./rollback.sh --hard v1.0.0-checkpoint
-```
+# Restaurar archivos al commit o tag indicado (argumento obligatorio)
+./rollback.sh <COMMIT_HASH_O_TAG>
 
-### 3. Rollback Manual mediante Git
-```bash
-# Opción A (Recomendada): Volver temporalmente al estado del checkpoint
-git checkout v1.0.0-checkpoint
-
-# Opción B (Reversión Limpia): Crear un commit inverso que deshaga los cambios recientes
-git revert HEAD --no-edit
-
-# Opción C (Forzar la rama main al commit estable anterior):
-git reset --hard v1.0.0-checkpoint
-```
-
-### 4. Sincronización con GitHub (Push)
-Para publicar este lanzamiento y sus etiquetas de restauración en tu repositorio de GitHub:
-```bash
-# 1. Verificar el remoto configurado:
-git remote -v
-# (origin está configurado apuntando a https://github.com/AlbertiJ/HoneyGate.git)
-
-# 2. Subir la rama main y los tags de checkpoint:
-git push -u origin main --tags
+# Restaurar forzando descarte de cambios locales
+./rollback.sh --hard <COMMIT_HASH_O_TAG>
 ```
 
 ---

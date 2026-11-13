@@ -43,6 +43,8 @@ class HoneyGateRepository(
 
   suspend fun saveHoneygateConfig(config: HoneygateConfigEntity) = configDao.saveConfig(config)
 
+  suspend fun getConfigOnce(): HoneygateConfigEntity? = configDao.getConfigOnce()
+
   /**
    * Invariante 1: Generación del Fingerprint Compuesto (device_id inmutable).
    * Combina MAC-por-SSID + Browser Fingerprint + Network JA3 + DHCP Fingerprint.
@@ -78,16 +80,20 @@ class HoneyGateRepository(
     val config = configDao.getConfigOnce()
     var daemonMsg = ""
     if (config != null && config.daemonSyncEnabled && config.daemonBaseUrl.isNotBlank() && targetIp.isNotBlank() && targetIp != "0.0.0.0") {
-      val token = config.daemonAuthToken.ifBlank { "hg_sec_token_9981" }
-      val remoteResult = if (blocked) {
-        daemonClient.remoteIsolate(config.daemonBaseUrl, token, targetIp, "Bloqueo confirmado por administrador en app HoneyGate para MAC $mac / $deviceId")
+      val token = config.daemonAuthToken.trim()
+      if (token.isEmpty()) {
+        daemonMsg = " [Daemon Linux: Configurá el token]"
       } else {
-        daemonClient.remoteUnblock(config.daemonBaseUrl, token, targetIp)
+        val remoteResult = if (blocked) {
+          daemonClient.remoteIsolate(config.daemonBaseUrl, token, targetIp, "Bloqueo confirmado por administrador en app HoneyGate para MAC $mac / $deviceId")
+        } else {
+          daemonClient.remoteUnblock(config.daemonBaseUrl, token, targetIp)
+        }
+        daemonMsg = remoteResult.fold(
+          onSuccess = { " [Kernel Linux: $it]" },
+          onFailure = { " [Daemon Linux no alcanzado: ${it.localizedMessage}]" }
+        )
       }
-      daemonMsg = remoteResult.fold(
-        onSuccess = { " [Kernel Linux: $it]" },
-        onFailure = { " [Daemon Linux no alcanzado: ${it.localizedMessage}]" }
-      )
     }
 
     val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -109,8 +115,15 @@ class HoneyGateRepository(
   /**
    * Consulta el estado en vivo del Daemon de HoneyGate en Linux (GET /api/status).
    */
-  suspend fun checkDaemonHealth(baseUrl: String): DaemonStatus {
-    return daemonClient.checkHealth(baseUrl)
+  suspend fun checkDaemonHealth(baseUrl: String, token: String): DaemonStatus {
+    if (token.isBlank()) {
+      return DaemonStatus(
+        online = false,
+        hostUrl = baseUrl.trimEnd('/'),
+        errorMessage = "Configurá el token"
+      )
+    }
+    return daemonClient.checkHealth(baseUrl, token)
   }
 
   /**
@@ -119,8 +132,11 @@ class HoneyGateRepository(
    * - Ingesta alertas forenses de inotify y honeypot (GET /api/alerts).
    */
   suspend fun syncWithDaemon(baseUrl: String, token: String): Result<String> {
-    val sessionsResult = daemonClient.getActiveSessions(baseUrl)
-    val alertsResult = daemonClient.getAlerts(baseUrl)
+    if (token.isBlank()) {
+      return Result.failure(Exception("Configurá el token"))
+    }
+    val sessionsResult = daemonClient.getActiveSessions(baseUrl, token)
+    val alertsResult = daemonClient.getAlerts(baseUrl, token)
 
     var sessionsIngested = 0
     var alertsIngested = 0
@@ -447,7 +463,9 @@ class HoneyGateRepository(
       honeytokensActive = true,
       legalConsentBannerEnabled = true
     )
-    configDao.saveConfig(initialConfig)
+    if (configDao.getConfigOnce() == null) {
+      configDao.saveConfig(initialConfig)
+    }
 
     val sampleEvents = listOf(
       ForensicEvent(

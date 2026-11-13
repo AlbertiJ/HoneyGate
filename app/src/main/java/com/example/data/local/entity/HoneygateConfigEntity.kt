@@ -45,6 +45,6 @@ data class HoneygateConfigEntity(
 
   // Conector Live Daemon Linux (Módulo 1)
   val daemonBaseUrl: String = "http://10.0.2.2:8888",
-  val daemonAuthToken: String = "hg_sec_token_9981",
+  val daemonAuthToken: String = "",
   val daemonSyncEnabled: Boolean = true
 )

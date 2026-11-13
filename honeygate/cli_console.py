@@ -1,6 +1,6 @@
 """
 ================================================================================
-UNDAHWOAR CLI: Consola Interactiva Avanzada No Bloqueante
+HONEYGATE CLI: Consola Interactiva Avanzada No Bloqueante
 Módulo Concurrente Thread-Safe con Autocompletado Predictivo de 3 Niveles
 Desarrollado para entornos Kali Linux (Terminal / WSL2)
 ================================================================================
@@ -16,7 +16,7 @@ import struct
 import logging
 import threading
 import subprocess
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 # Intentar importar prompt_toolkit con degradación elegante a terminal interactivo
 try:
@@ -24,7 +24,6 @@ try:
     from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.styles import Style
     from prompt_toolkit.completion import Completer, Completion
-    from prompt_toolkit.shortcuts import print_formatted_text
     from prompt_toolkit.history import InMemoryHistory
     PROMPT_TOOLKIT_AVAILABLE = True
 except ImportError:
@@ -35,22 +34,22 @@ except ImportError:
     class Completion:
         pass
 
-from undahwoar.honeywall_core import UndahwoarHoneywall
+from honeygate.honeywall_core import HoneyGateHoneywall
 
-logger = logging.getLogger("UndahwoarCLI")
+logger = logging.getLogger("HoneyGateCLI")
 
 
-class UndahwoarDynamicCompleter(Completer):
+class HoneyGateDynamicCompleter(Completer):
     """
     Motor de Autocompletado Inteligente en Tiempo Real de Tres Niveles:
     1. Comandos de Gestión del Honeywall (status, honeywall-stats, isolate <ip>, logs, exit).
     2. Comandos de Auditoría del Sistema en Espacio de Usuario (/proc/net/tcp, /proc/net/arp, nmcli).
     3. Scripts de Laboratorio y Capacitación indexados dinámicamente desde ./modules/*.py.
     """
-    def __init__(self, honeywall: UndahwoarHoneywall, modules_dir: str = "./modules"):
+    def __init__(self, honeywall: HoneyGateHoneywall, modules_dir: str = "./modules"):
         self.honeywall = honeywall
         self.modules_dir = os.path.abspath(modules_dir)
-        
+
         # 1. Diccionario de Comandos de Gestión y descripciones
         self.mgmt_commands = {
             "status": "Muestra estado del motor epoll y métricas en tiempo real",
@@ -83,7 +82,7 @@ class UndahwoarDynamicCompleter(Completer):
         # Caso A: Cursor en el primer token -> Autocompletar Comandos de Gestión y Auditoría
         if len(words) == 0 or (len(words) == 1 and not text_before_cursor.endswith(" ")):
             prefix = words[0] if words else ""
-            
+
             # Nivel 1: Comandos de Gestión
             for cmd, desc in self.mgmt_commands.items():
                 if cmd.startswith(prefix.lower()):
@@ -102,7 +101,7 @@ class UndahwoarDynamicCompleter(Completer):
             # Nivel 1 (Sub-argumentos): 'isolate <ip>' -> Sugerir IPs de conexiones activas
             if first_cmd == "isolate":
                 snapshot = self.honeywall.get_snapshot()
-                active_ips = {s["ip"]: f"FD={s['fd']}, Port={s['port']}, Rate={s['outbound_rate_min']} req/m" 
+                active_ips = {s["ip"]: f"FD={s['fd']}, Port={s['port']}, Rate={s['outbound_rate_min']} req/m"
                               for s in snapshot["active_sessions"]}
                 for ip, meta in active_ips.items():
                     if ip.startswith(prefix):
@@ -236,20 +235,20 @@ class InteractiveCLI:
     Ejecutada concurrentemente en un hilo dedicado (threading.Thread).
     Comunica eventos de forma thread-safe mediante queue.Queue y cerrojos reentrantes.
     """
-    def __init__(self, honeywall: UndahwoarHoneywall, epoll_engine=None):
+    def __init__(self, honeywall: HoneyGateHoneywall, epoll_engine=None):
         self.honeywall = honeywall
         self.epoll_engine = epoll_engine
         self.command_queue: queue.Queue = queue.Queue()
         self.is_running = False
         self.cli_thread: Optional[threading.Thread] = None
-        self.completer = UndahwoarDynamicCompleter(honeywall)
+        self.completer = HoneyGateDynamicCompleter(honeywall)
 
     def start_in_background(self) -> threading.Thread:
         """Lanza la consola interactiva en un hilo secundario dedicado para no bloquear epoll."""
         self.is_running = True
         self.cli_thread = threading.Thread(
             target=self._run_cli_loop,
-            name="UndahwoarCLIThread",
+            name="HoneyGateCLIThread",
             daemon=True
         )
         self.cli_thread.start()
@@ -270,7 +269,7 @@ class InteractiveCLI:
         """Despliega el banner defensivo en la terminal de Kali Linux."""
         banner = """
 \033[1;36m╔══════════════════════════════════════════════════════════════════════════╗
-║  \033[1;32mUNDAHWOAR DEFENSIVE HONEYWALL FRAMEWORK\033[1;36m - Kali Linux Deception Core  ║
+║  \033[1;32mHONEYGATE DEFENSIVE HONEYWALL FRAMEWORK\033[1;36m - Kali Linux Deception Core  ║
 ║  \033[0;37mEdge-Triggered epoll | Non-Root User Space | Rate-Limiting Container   \033[1;36m║
 ╚══════════════════════════════════════════════════════════════════════════╝\033[0m
         """
@@ -284,7 +283,7 @@ class InteractiveCLI:
         isolated_count = len(snapshot["isolated_ips"])
         violations = snapshot["stats"]["rate_limit_violations"]
         return HTML(
-            f" <b><style fg='#00d4ff'>[UNDAHWOAR]</style></b> "
+            f" <b><style fg='#00d4ff'>[HONEYGATE]</style></b> "
             f"Activas: <b><style fg='#00ff66'>{active_count}</style></b> | "
             f"Aisladas: <b><style fg='#ff3366'>{isolated_count}</style></b> | "
             f"Violaciones Rate-Limit: <b><style fg='#ffcc00'>{violations}</style></b> | "
@@ -311,13 +310,13 @@ class InteractiveCLI:
 
         while self.is_running:
             try:
-                user_input = session.prompt(HTML("<b><style fg='#00ff66'>undahwoar@kali</style></b>:<b><style fg='#00d4ff'>~#</style></b> "))
+                user_input = session.prompt(HTML("<b><style fg='#00ff66'>honeygate@kali</style></b>:<b><style fg='#00d4ff'>~#</style></b> "))
                 cmd = user_input.strip()
                 if not cmd:
                     continue
 
                 if cmd.lower() in ("exit", "quit"):
-                    print("\033[1;33m[*] Finalizando consola interactiva Undahwoar...\033[0m")
+                    print("\033[1;33m[*] Finalizando consola interactiva HoneyGate...\033[0m")
                     self.is_running = False
                     if self.epoll_engine:
                         self.epoll_engine.stop()
@@ -336,7 +335,7 @@ class InteractiveCLI:
         """Modo de ejecución alternativo estándar en caso de no contar con prompt_toolkit."""
         while self.is_running:
             try:
-                cmd = input("\033[1;32mundahwoar@kali\033[0m:\033[1;36m~#\033[0m ").strip()
+                cmd = input("\033[1;32mhoneygate@kali\033[0m:\033[1;36m~#\033[0m ").strip()
                 if not cmd:
                     continue
                 if cmd.lower() in ("exit", "quit"):
@@ -380,7 +379,7 @@ class InteractiveCLI:
             print(f"\033[1;31m[!] Comando no reconocido: '{cmd}'. Escriba 'help' para la lista.\033[0m")
 
     def _cmd_help(self):
-        print("\n\033[1;36m=== MANUAL DE COMANDOS UNDAHWOAR ===\033[0m")
+        print("\n\033[1;36m=== MANUAL DE COMANDOS HONEYGATE ===\033[0m")
         for c, d in self.completer.mgmt_commands.items():
             print(f"  \033[1;32m{c:<16}\033[0m : {d}")
         print("\n\033[1;33m[Auditoría en Espacio de Usuario]:\033[0m")
@@ -392,7 +391,7 @@ class InteractiveCLI:
     def _cmd_status(self):
         snapshot = self.honeywall.get_snapshot()
         st = snapshot["stats"]
-        print("\n\033[1;36m=== ESTADO DEL SISTEMA UNDAHWOAR ===\033[0m")
+        print("\n\033[1;36m=== ESTADO DEL SISTEMA HONEYGATE ===\033[0m")
         print(f" • Conexiones Totales Históricas : \033[1;32m{st['total_connections']}\033[0m")
         print(f" • Conexiones Activas Ahora      : \033[1;33m{len(snapshot['active_sessions'])}\033[0m")
         print(f" • IPs Aisladas Perimetralmente  : \033[1;31m{len(snapshot['isolated_ips'])}\033[0m")
@@ -404,7 +403,7 @@ class InteractiveCLI:
 
     def _cmd_honeywall_stats(self):
         snapshot = self.honeywall.get_snapshot()
-        print("\n\033[1;36m=== TELEMETRÍA DEL HONEYWALL (UNDAHWOAR) ===\033[0m")
+        print("\n\033[1;36m=== TELEMETRÍA DEL HONEYWALL (HONEYGATE) ===\033[0m")
         print(f" • Umbral de Tasa Saliente Máxima: \033[1;31m{snapshot['max_outbound_threshold']} req/minuto\033[0m")
         print(f" • Acción ante Infracción        : \033[1;31mshutdown(SHUT_RDWR) + close() + Aislamiento de IP\033[0m")
         isolated = snapshot["isolated_ips"]
@@ -480,7 +479,7 @@ class InteractiveCLI:
         script_arg = args[0]
         if not script_arg.endswith(".py"):
             script_arg += ".py"
-        
+
         # Resolver ruta en ./modules/
         if os.path.exists(script_arg):
             target_path = script_arg
