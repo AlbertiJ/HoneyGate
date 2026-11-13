@@ -41,12 +41,26 @@ class ConnectionSession:
     Estructura de datos para representar una sesión activa capturada por el Honeywall.
     Trackea descriptores, timestamps, volumen de datos y tramas salientes.
     """
-    def __init__(self, fd: int, sock: socket.socket, client_ip: str, client_port: int, mac: str = "UNKNOWN"):
+    def __init__(
+        self,
+        fd: int,
+        sock: socket.socket,
+        client_ip: str,
+        client_port: int,
+        mac: str = "UNKNOWN",
+        dest_ip: str = "0.0.0.0",
+        dest_port: int = 0,
+        service: str = "unknown",
+    ):
         self.fd: int = fd
         self.sock: socket.socket = sock
         self.client_ip: str = client_ip
         self.client_port: int = client_port
         self.mac: str = mac
+        self.dest_ip: str = dest_ip
+        self.dest_port: int = dest_port
+        self.service: str = service
+        self.storage_id: Optional[int] = None
         self.connected_at: float = time.time()
         self.last_activity: float = time.time()
         self.bytes_in: int = 0
@@ -92,8 +106,13 @@ class HoneyGateHoneywall:
     """
     MAX_OUTBOUND_PER_MINUTE: int = 10  # Umbral estricto contra pivoteo/escaneo
 
-    def __init__(self, alert_callback: Optional[Callable[[str, str, str], None]] = None):
+    def __init__(
+        self,
+        alert_callback: Optional[Callable[[str, str, str], None]] = None,
+        storage: Optional[Any] = None,
+    ):
         self._lock = threading.RLock()
+        self.storage = storage
         # Sesiones activas indexadas por descriptor de archivo (fd)
         self.sessions_by_fd: Dict[int, ConnectionSession] = {}
         # Mapeo de (IP, MAC) -> lista de descriptores de archivos asociados
@@ -110,6 +129,11 @@ class HoneyGateHoneywall:
             "bytes_out_total": 0,
         }
         self.alert_callback = alert_callback
+        if self.storage is not None:
+            self.isolated_ips = self.storage.list_isolated_ips()
+            self.stats["isolated_count"] = len(self.isolated_ips)
+            cfg = self.storage.get_config()
+            self.MAX_OUTBOUND_PER_MINUTE = int(cfg.get("max_outbound_per_minute", self.MAX_OUTBOUND_PER_MINUTE))
 
     @staticmethod
     def resolve_mac_address(ip_address: str) -> str:
@@ -132,6 +156,20 @@ class HoneyGateHoneywall:
             pass
         return "UNKNOWN"
 
+    @staticmethod
+    def _service_for_port(port: int) -> str:
+        mapping = {
+            2222: "ssh",
+            32222: "ssh",
+            2323: "telnet",
+            8080: "http",
+            38080: "http",
+            8443: "https",
+            3306: "mysql",
+            33306: "mysql",
+        }
+        return mapping.get(port, f"tcp/{port}" if port > 0 else "unknown")
+
     def register_connection(self, fd: int, sock: socket.socket, client_ip: str, client_port: int) -> ConnectionSession:
         """
         Registra una nueva conexión en el Honeywall indexándola por IP y MAC.
@@ -139,16 +177,37 @@ class HoneyGateHoneywall:
         """
         with self._lock:
             mac = self.resolve_mac_address(client_ip)
+            dest_ip = "0.0.0.0"
+            dest_port = 0
+            try:
+                sock_addr = sock.getsockname()
+                if isinstance(sock_addr, tuple) and len(sock_addr) >= 2:
+                    dest_ip = str(sock_addr[0])
+                    dest_port = int(sock_addr[1])
+            except OSError:
+                pass
+            service = self._service_for_port(dest_port)
 
             # Si la IP ya estaba aislada por violaciones previas, expulsar de inmediato
             if client_ip in self.isolated_ips:
                 logger.warning(
                     f"[HONEYGATE-DROP] Intento de conexión desde IP aislada: {client_ip}:{client_port} (MAC: {mac})."
                 )
+                if self.storage is not None:
+                    self.storage.record_event(
+                        event_type="ISOLATED_CONNECTION_DROPPED",
+                        severity="warning",
+                        ip=client_ip,
+                        description=f"Conexión rechazada de IP aislada {client_ip}:{client_port} hacia {service}",
+                        metadata={"client_port": client_port, "dest_port": dest_port, "service": service},
+                    )
                 self._force_disconnect_native(fd, sock, "IP en lista de aislamiento activo")
                 raise HoneywallSecurityException(f"IP {client_ip} aislada previamente")
 
-            session = ConnectionSession(fd, sock, client_ip, client_port, mac)
+            session = ConnectionSession(
+                fd, sock, client_ip, client_port, mac,
+                dest_ip=dest_ip, dest_port=dest_port, service=service,
+            )
             self.sessions_by_fd[fd] = session
 
             host_key = (client_ip, mac)
@@ -158,6 +217,27 @@ class HoneyGateHoneywall:
 
             self.stats["total_connections"] += 1
             self.stats["active_connections"] = len(self.sessions_by_fd)
+
+            if self.storage is not None:
+                session.storage_id = self.storage.create_session(
+                    ip=client_ip,
+                    mac=mac,
+                    client_port=client_port,
+                    dest_ip=dest_ip,
+                    dest_port=dest_port,
+                    service=service,
+                    fd=fd,
+                    status="active",
+                )
+                self.storage.record_event(
+                    event_type="CONNECTION_ACCEPTED",
+                    severity="info",
+                    session_id=session.storage_id,
+                    device_id=f"net:{client_ip}:{mac}",
+                    ip=client_ip,
+                    description=f"Conexión registrada desde {client_ip}:{client_port} hacia {service} ({dest_port})",
+                    metadata={"fd": fd, "dest_port": dest_port, "service": service},
+                )
 
             logger.info(
                 f"[HONEYWALL-ACCEPT] Conexión registrada: FD={fd} -> {client_ip}:{client_port} "
@@ -217,6 +297,16 @@ class HoneyGateHoneywall:
                 "reason": reason,
             }
             self.stats["isolated_count"] = len(self.isolated_ips)
+            if self.storage is not None:
+                self.storage.set_isolated_ip(ip_address, reason)
+                self.storage.record_event(
+                    event_type="IP_ISOLATED",
+                    severity="critical",
+                    ip=ip_address,
+                    mitre_technique="T1046" if "tasa" in reason.lower() else "",
+                    description=f"IP {ip_address} aislada: {reason}",
+                    metadata={"reason": reason},
+                )
             logger.warning(f"[HONEYGATE-ISOLATE] IP {ip_address} agregada a lista de contención. Motivo: {reason}")
 
             # Desconectar todas las conexiones abiertas por esta IP
@@ -230,12 +320,23 @@ class HoneyGateHoneywall:
     def unblock_ip(self, ip_address: str) -> bool:
         """Remueve una IP de la lista negra de aislamiento."""
         with self._lock:
+            removed = False
             if ip_address in self.isolated_ips:
                 del self.isolated_ips[ip_address]
                 self.stats["isolated_count"] = len(self.isolated_ips)
+                removed = True
+            if self.storage is not None:
+                removed = self.storage.remove_isolated_ip(ip_address) or removed
+                if removed:
+                    self.storage.record_event(
+                        event_type="IP_UNBLOCKED",
+                        severity="info",
+                        ip=ip_address,
+                        description=f"IP {ip_address} desbloqueada de la lista de contención",
+                    )
+            if removed:
                 logger.info(f"[HONEYGATE-UNBLOCK] IP {ip_address} desbloqueada satisfactoriamente.")
-                return True
-            return False
+            return removed
 
     def terminate_session(self, fd: int, reason: str = "Cierre estándar"):
         """
@@ -256,6 +357,15 @@ class HoneyGateHoneywall:
             self.stats["active_connections"] = len(self.sessions_by_fd)
             session.is_isolated = True
             session.violation_reason = reason
+
+            if self.storage is not None and session.storage_id is not None:
+                final_status = "isolated" if session.client_ip in self.isolated_ips else "closed"
+                self.storage.close_session(
+                    session.storage_id,
+                    bytes_in=session.bytes_in,
+                    bytes_out=session.bytes_out,
+                    status=final_status,
+                )
 
             self._force_disconnect_native(fd, session.sock, reason)
 
@@ -287,9 +397,12 @@ class HoneyGateHoneywall:
             active_list = []
             for s in self.sessions_by_fd.values():
                 active_list.append({
+                    "id": s.storage_id,
                     "fd": s.fd,
                     "ip": s.client_ip,
                     "port": s.client_port,
+                    "dest_port": s.dest_port,
+                    "service": s.service,
                     "mac": s.mac,
                     "connected_at": s.connected_at,
                     "duration_sec": round(time.time() - s.connected_at, 2),
@@ -297,7 +410,9 @@ class HoneyGateHoneywall:
                     "bytes_out": s.bytes_out,
                     "outbound_rate_min": s.get_outbound_rate_per_minute(),
                 })
+            mode = self.storage.get_config()["mode"] if self.storage is not None else 1
             return {
+                "mode": mode,
                 "stats": dict(self.stats),
                 "active_sessions": active_list,
                 "isolated_ips": dict(self.isolated_ips),

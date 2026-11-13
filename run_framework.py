@@ -16,6 +16,7 @@ from honeygate.honeywall_core import HoneyGateHoneywall, EpollNetworkEngine
 from honeygate.cli_console import InteractiveCLI
 from honeygate.forensic_monitor import ForensicAlertManager, DesktopNotificationDispatcher
 from honeygate.dashboard_api import AsyncDashboardServer
+from honeygate.storage import HoneyGateStorage
 
 logger = logging.getLogger("HoneyGateMain")
 
@@ -24,14 +25,18 @@ def main():
     # Asegurar directorios de ejecución
     os.makedirs("logs", exist_ok=True)
     os.makedirs("modules", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
 
     print("\033[1;36m[+] Iniciando Framework Defensivo HoneyGate (Non-Root User Space)...\033[0m")
+
+    # 0. Capa de persistencia única en SQLite
+    storage = HoneyGateStorage(db_path="data/honeygate.db")
 
     # 1. Instanciar Honeywall con callback para notificaciones de alerta inmediata
     def on_honeywall_alert(title: str, message: str, urgency: str):
         DesktopNotificationDispatcher.dispatch(title, message, urgency)
 
-    honeywall = HoneyGateHoneywall(alert_callback=on_honeywall_alert)
+    honeywall = HoneyGateHoneywall(alert_callback=on_honeywall_alert, storage=storage)
 
     # 2. Inicializar Motor de Sockets epoll en Puertos Altos (>1024)
     # 2222 (SSH Simulado), 8080 (HTTP Simulado), 8443 (HTTPS Simulado)
@@ -41,11 +46,17 @@ def main():
 
     # 3. Inicializar Monitor Forense inotify para logs locales y cowrie.json
     log_targets = ["logs/honeywall.log", "logs/cowrie.json", "cowrie.json"]
-    forensics = ForensicAlertManager(target_log_files=log_targets)
+    forensics = ForensicAlertManager(target_log_files=log_targets, storage=storage)
     forensics.start_background()
 
     # 4. Inicializar Servidor Web y API de Telemetría Asíncrona (127.0.0.1 seguro por defecto)
-    web_api = AsyncDashboardServer(honeywall=honeywall, forensics=forensics, host="127.0.0.1", port=8888)
+    web_api = AsyncDashboardServer(
+        honeywall=honeywall,
+        forensics=forensics,
+        host="127.0.0.1",
+        port=8888,
+        storage=storage,
+    )
     web_api.start_background()
 
     # Manejador de señales de terminación
@@ -54,6 +65,7 @@ def main():
         epoll_engine.stop()
         forensics.stop()
         web_api.stop()
+        storage.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)

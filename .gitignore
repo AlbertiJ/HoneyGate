@@ -28,3 +28,7 @@ __pycache__/
 logs/*.log
 logs/*.json
 !logs/.gitkeep
+data/*.db
+data/*.db-wal
+data/*.db-shm
+

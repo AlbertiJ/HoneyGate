@@ -172,9 +172,15 @@ class ForensicAlertManager:
         re.IGNORECASE
     )
 
-    def __init__(self, target_log_files: List[str], alert_history_limit: int = 200):
+    def __init__(
+        self,
+        target_log_files: List[str],
+        alert_history_limit: int = 200,
+        storage: Optional[Any] = None,
+    ):
         self.target_files = target_log_files
         self.history_limit = alert_history_limit
+        self.storage = storage
         self.alerts_history: List[Dict[str, Any]] = []
         self._lock = threading.RLock()
         self.file_pointers: Dict[str, int] = {}
@@ -346,6 +352,18 @@ class ForensicAlertManager:
             self.alerts_history.append(alert_obj)
             if len(self.alerts_history) > self.history_limit:
                 self.alerts_history.pop(0)
+
+        if self.storage is not None:
+            src_ip = str(data.get("ip") or data.get("src_ip") or "")
+            mitre = "T1110" if "FAILED" in event_type else ("T1078" if "ACCEPTED" in event_type or "SUCCESS" in event_type else "")
+            self.storage.record_event(
+                event_type=event_type,
+                severity=severity,
+                ip=src_ip,
+                mitre_technique=mitre,
+                description=f"{title}: {message}",
+                metadata=data,
+            )
 
         logger.warning(f"[FORENSIC-TRIGGER] [{severity.upper()}] {title}: {message}")
 
