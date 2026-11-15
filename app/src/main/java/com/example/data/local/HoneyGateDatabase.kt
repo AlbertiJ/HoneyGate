@@ -17,7 +17,7 @@ import com.example.data.local.entity.MonitoredSessionEntity
     MonitoredSessionEntity::class,
     HoneygateConfigEntity::class
   ],
-  version = 6,
+  version = 7,
   exportSchema = false
 )
 abstract class HoneyGateDatabase : RoomDatabase() {

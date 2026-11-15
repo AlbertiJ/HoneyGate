@@ -17,6 +17,14 @@ import threading
 from collections import deque
 from typing import Dict, Tuple, Optional, List, Any, Callable
 
+from honeygate.deception import (
+    EmulatedServiceEngine,
+    MAX_COMMANDS_PER_SESSION,
+    MAX_LINE_BYTES,
+    MAX_SESSION_DURATION_SEC,
+    sanitize_captured_text,
+)
+
 # Configuración de Logging Forense
 # INVARIANTE 7: asegurar logs/ antes de configurar los handlers (evita fallar al importar)
 os.makedirs("logs", exist_ok=True)
@@ -69,6 +77,8 @@ class ConnectionSession:
         self.outbound_timestamps: deque = deque()
         self.is_isolated: bool = False
         self.violation_reason: Optional[str] = None
+        self.commands_count: int = 0
+        self.honeytoken_touched: Optional[str] = None
         self.inbound_buffer: bytearray = bytearray()
         self.outbound_buffer: bytearray = bytearray()
 
@@ -110,9 +120,11 @@ class HoneyGateHoneywall:
         self,
         alert_callback: Optional[Callable[[str, str, str], None]] = None,
         storage: Optional[Any] = None,
+        port_services: Optional[Dict[int, str]] = None,
     ):
         self._lock = threading.RLock()
         self.storage = storage
+        self.port_services: Dict[int, str] = dict(port_services) if port_services else {}
         # Sesiones activas indexadas por descriptor de archivo (fd)
         self.sessions_by_fd: Dict[int, ConnectionSession] = {}
         # Mapeo de (IP, MAC) -> lista de descriptores de archivos asociados
@@ -156,15 +168,18 @@ class HoneyGateHoneywall:
             pass
         return "UNKNOWN"
 
-    @staticmethod
-    def _service_for_port(port: int) -> str:
+    def _service_for_port(self, port: int) -> str:
+        if port in self.port_services:
+            return self.port_services[port]
         mapping = {
             2222: "ssh",
             32222: "ssh",
             2323: "telnet",
+            32323: "telnet",
             8080: "http",
             38080: "http",
             8443: "https",
+            38443: "https",
             3306: "mysql",
             33306: "mysql",
         }
@@ -425,9 +440,22 @@ class EpollNetworkEngine:
     Motor de E/S Asíncrona de Bajo Nivel basado en select.epoll con Edge-Triggered (EPOLLET).
     Gestiona servidores no bloqueantes en puertos altos (>1024) en espacio de usuario.
     """
-    def __init__(self, ports: List[int], honeywall: HoneyGateHoneywall):
+    def __init__(
+        self,
+        ports: List[int],
+        honeywall: HoneyGateHoneywall,
+        host: Optional[str] = None,
+        max_line_bytes: int = MAX_LINE_BYTES,
+        max_commands_per_session: int = MAX_COMMANDS_PER_SESSION,
+        max_session_duration_sec: float = MAX_SESSION_DURATION_SEC,
+    ):
         self.ports = ports
         self.honeywall = honeywall
+        env_host = os.environ.get("HONEYGATE_EPOLL_HOST", "").strip()
+        self.host = (host.strip() if isinstance(host, str) and host.strip() else (env_host or "127.0.0.1"))
+        self.max_line_bytes = max(32, int(max_line_bytes))
+        self.max_commands_per_session = max(1, int(max_commands_per_session))
+        self.max_session_duration_sec = max(0.05, float(max_session_duration_sec))
         self.epoll = select.epoll()
         self.server_sockets: Dict[int, socket.socket] = {}
         self.is_running = False
@@ -452,7 +480,7 @@ class EpollNetworkEngine:
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Reutilización rápida de dirección y puerto a nivel kernel (SO_REUSEADDR)
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_sock.bind(("0.0.0.0", port))
+            server_sock.bind((self.host, port))
             server_sock.listen(128)
 
             # Aplicar O_NONBLOCK con fcntl
@@ -466,7 +494,37 @@ class EpollNetworkEngine:
                 server_fd,
                 select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
             )
-            logger.info(f"[EPOLL-INIT] Escuchando en 0.0.0.0:{port} (FD={server_fd}) en modo Edge-Triggered.")
+            logger.info(f"[EPOLL-INIT] Escuchando en {self.host}:{port} (FD={server_fd}) en modo Edge-Triggered.")
+
+    def _sweep_expired_sessions(self):
+        """Cierra sesiones emuladas que superaron la duración máxima permitida."""
+        now = time.time()
+        with self.honeywall._lock:
+            expired = [
+                s for s in self.honeywall.sessions_by_fd.values()
+                if (now - s.connected_at) > self.max_session_duration_sec
+            ]
+        for s in expired:
+            if self.honeywall.storage is not None:
+                self.honeywall.storage.record_event(
+                    event_type="DECEPTION_SESSION_TIMEOUT",
+                    severity="warning",
+                    session_id=s.storage_id,
+                    device_id=f"net:{s.client_ip}:{s.mac}",
+                    ip=s.client_ip,
+                    mitre_technique="T1059",
+                    description=(
+                        f"Sesión emulada #{s.storage_id or s.fd} cerrada por límite de duración "
+                        f"({self.max_session_duration_sec}s) en {s.service}:{s.dest_port}"
+                    ),
+                    metadata={"service": s.service, "dest_port": s.dest_port},
+                )
+            if s.service not in ("http", "https"):
+                try:
+                    s.sock.send(b"Session timed out.\r\n")
+                except OSError:
+                    pass
+            self._unregister_and_close(s.fd, "Duración máxima de sesión emulada alcanzada")
 
     def run_event_loop(self):
         """
@@ -480,9 +538,11 @@ class EpollNetworkEngine:
         try:
             while self.is_running:
                 try:
-                    events = self.epoll.poll(timeout=0.5)
+                    events = self.epoll.poll(timeout=0.1)
                 except InterruptedError:
                     continue
+
+                self._sweep_expired_sessions()
 
                 for fd, event in events:
                     # 1. Eventos en sockets de escucha del servidor (Nuevas conexiones entrantes)
@@ -515,8 +575,10 @@ class EpollNetworkEngine:
         while True:
             try:
                 client_sock, (client_ip, client_port) = server_sock.accept()
-            except (BlockingIOError, socket.error):
+            except BlockingIOError:
                 # En modo Edge-Triggered, EAGAIN / EWOULDBLOCK indica que no quedan conexiones pendientes
+                break
+            except OSError:
                 break
 
             # Configurar descriptor cliente inmediatamente como no bloqueante mediante fcntl
@@ -525,7 +587,7 @@ class EpollNetworkEngine:
 
             try:
                 # Registrar sesión en el Honeywall perimetral
-                self.honeywall.register_connection(client_fd, client_sock, client_ip, client_port)
+                session = self.honeywall.register_connection(client_fd, client_sock, client_ip, client_port)
 
                 # Registrar en epoll en modo Edge-Triggered
                 self.epoll.register(
@@ -533,23 +595,268 @@ class EpollNetworkEngine:
                     select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
                 )
 
-                # Enviar banner SSH estándar realista (sin revelar señuelo)
-                banner = "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2\r\n"
-                try:
-                    client_sock.send(banner.encode("utf-8"))
-                    # Evaluar tráfico de salida en Honeywall
-                    self.honeywall.evaluate_outbound_traffic(client_fd, frame_size=len(banner))
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pass
+                # Enviar banner estático realista por servicio (sin revelar señuelo ni abrir red)
+                banner = EmulatedServiceEngine.banner_for_service(session.service)
+                if banner:
+                    try:
+                        client_sock.send(banner)
+                        # Evaluar tráfico de salida en Honeywall
+                        self.honeywall.evaluate_outbound_traffic(client_fd, frame_size=len(banner))
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
 
             except HoneywallSecurityException:
                 # La IP ya estaba en lista negra; socket ya fue cerrado por Honeywall
                 pass
 
+    def _send_deception_bytes(self, session: ConnectionSession, payload: bytes) -> bool:
+        """Envía bytes de respuesta estática respetando el rate-limiter del Honeywall."""
+        if not payload:
+            return True
+        client_fd = session.fd
+        if not self.honeywall.evaluate_outbound_traffic(client_fd, frame_size=len(payload)):
+            try:
+                self.epoll.unregister(client_fd)
+            except OSError:
+                pass
+            return False
+        try:
+            session.sock.send(payload)
+        except BlockingIOError:
+            try:
+                self.epoll.modify(
+                    client_fd,
+                    select.EPOLLIN | select.EPOLLOUT | select.EPOLLET | select.EPOLLHUP | select.EPOLLERR
+                )
+            except OSError:
+                pass
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self._unregister_and_close(client_fd, "Error enviando respuesta emulada")
+            return False
+        return True
+
+    def _dispatch_deception_line(self, session: ConnectionSession, raw_line: bytes) -> bool:
+        """
+        Evalúa una línea ya acotada mediante tabla fija (sin ejecutar ni abrir red saliente),
+        registra el evento como texto plano sanitizado y aplica límites de comandos y duración.
+        """
+        now = time.time()
+        if (now - session.connected_at) > self.max_session_duration_sec:
+            if self.honeywall.storage is not None:
+                self.honeywall.storage.record_event(
+                    event_type="DECEPTION_SESSION_TIMEOUT",
+                    severity="warning",
+                    session_id=session.storage_id,
+                    device_id=f"net:{session.client_ip}:{session.mac}",
+                    ip=session.client_ip,
+                    mitre_technique="T1059",
+                    description=f"Sesión #{session.storage_id or session.fd} cerrada por timeout ({self.max_session_duration_sec}s)",
+                    metadata={"service": session.service, "dest_port": session.dest_port},
+                )
+            if session.service not in ("http", "https"):
+                self._send_deception_bytes(session, b"Session timed out.\r\n")
+            self._unregister_and_close(session.fd, "Duración máxima de sesión excedida")
+            return False
+
+        if session.commands_count >= self.max_commands_per_session:
+            if self.honeywall.storage is not None:
+                self.honeywall.storage.record_event(
+                    event_type="DECEPTION_COMMAND_LIMIT_EXCEEDED",
+                    severity="warning",
+                    session_id=session.storage_id,
+                    device_id=f"net:{session.client_ip}:{session.mac}",
+                    ip=session.client_ip,
+                    mitre_technique="T1059",
+                    description=(
+                        f"Límite de {self.max_commands_per_session} comandos alcanzado en "
+                        f"{session.service}:{session.dest_port}"
+                    ),
+                    metadata={"service": session.service, "dest_port": session.dest_port},
+                )
+            if session.service not in ("http", "https"):
+                self._send_deception_bytes(session, b"Maximum commands per session exceeded.\r\n")
+            self._unregister_and_close(session.fd, "Límite de comandos por sesión alcanzado")
+            return False
+
+        session.commands_count += 1
+        honeytokens: List[Dict[str, str]] = []
+        if self.honeywall.storage is not None:
+            honeytokens = self.honeywall.storage.get_config().get("honeytokens", [])
+
+        response, evt_meta = EmulatedServiceEngine.evaluate_input(
+            service=session.service,
+            raw_line=raw_line,
+            honeytokens=honeytokens,
+        )
+
+        captured_text = evt_meta.get("captured_text", "")
+        touched_ht = evt_meta.get("honeytoken_touched")
+        ev_type = evt_meta.get("event_type", "DECEPTION_COMMAND_CAPTURED")
+        sev = evt_meta.get("severity", "normal")
+        mitre = evt_meta.get("mitre_technique", "")
+
+        if self.honeywall.storage is not None and (captured_text or session.service in ("http", "https", "mysql")):
+            if touched_ht:
+                prefix = f"Honeytoken ficticio '{touched_ht}' accedido"
+            elif ev_type == "DECEPTION_EGRESS_BLOCKED":
+                prefix = "Intento de conexión saliente o ejecución bloqueado en señuelo"
+            elif session.service in ("http", "https"):
+                prefix = "Sonda HTTP capturada en servicio emulado"
+            else:
+                prefix = "Entrada capturada en servicio emulado"
+
+            desc = f"{prefix} ({session.service}:{session.dest_port}): {captured_text}".strip()
+            self.honeywall.storage.record_event(
+                event_type=ev_type,
+                severity=sev,
+                session_id=session.storage_id,
+                device_id=f"net:{session.client_ip}:{session.mac}",
+                ip=session.client_ip,
+                mitre_technique=mitre,
+                description=desc,
+                metadata={
+                    "service": session.service,
+                    "dest_port": session.dest_port,
+                    "command": captured_text,
+                    "honeytoken_touched": touched_ht,
+                },
+            )
+            if touched_ht and session.storage_id is not None:
+                session.honeytoken_touched = touched_ht
+                self.honeywall.storage.mark_session_honeytoken(session.storage_id, touched_ht)
+
+        if self.honeywall.alert_callback:
+            if touched_ht:
+                self.honeywall.alert_callback(
+                    "Honeytoken Ficticio Accedido",
+                    f"IP {session.client_ip} tocó honeytoken '{touched_ht}' en {session.service}:{session.dest_port}",
+                    "critical",
+                )
+            elif ev_type == "DECEPTION_EGRESS_BLOCKED":
+                self.honeywall.alert_callback(
+                    "Egreso Bloqueado en Señuelo",
+                    f"IP {session.client_ip} intentó salida/ejecución bloqueada: {captured_text[:80]}",
+                    "critical",
+                )
+
+        if not self._send_deception_bytes(session, response):
+            return False
+
+        if session.service in ("ssh", "telnet") and captured_text.strip().lower() in ("exit", "quit"):
+            self._unregister_and_close(session.fd, "Cierre solicitado por cliente emulado")
+            return False
+
+        return True
+
+    def _process_session_buffer(self, session: ConnectionSession) -> bool:
+        """Aplica límite por línea y despacha entradas completas sin ejecutar ni abrir red."""
+        if session.service in ("http", "https"):
+            # Verificar que ninguna línea HTTP supere MAX_LINE_BYTES
+            for part in bytes(session.inbound_buffer).split(b"\n"):
+                if len(part.rstrip(b"\r")) > self.max_line_bytes:
+                    clipped = sanitize_captured_text(part[:self.max_line_bytes], max_len=self.max_line_bytes)
+                    if self.honeywall.storage is not None:
+                        self.honeywall.storage.record_event(
+                            event_type="DECEPTION_LINE_LIMIT_EXCEEDED",
+                            severity="warning",
+                            session_id=session.storage_id,
+                            device_id=f"net:{session.client_ip}:{session.mac}",
+                            ip=session.client_ip,
+                            mitre_technique="T1190",
+                            description=f"Línea HTTP excede {self.max_line_bytes} bytes: {clipped}",
+                            metadata={
+                                "service": session.service,
+                                "dest_port": session.dest_port,
+                                "command": clipped,
+                            },
+                        )
+                    session.inbound_buffer.clear()
+                    self._send_deception_bytes(
+                        session,
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 27\r\nConnection: close\r\n\r\nLine length limit exceeded.",
+                    )
+                    self._unregister_and_close(session.fd, "Línea HTTP excede límite máximo")
+                    return False
+
+            end_idx = session.inbound_buffer.find(b"\r\n\r\n")
+            sep_len = 4
+            if end_idx == -1:
+                end_idx = session.inbound_buffer.find(b"\n\n")
+                sep_len = 2
+            if end_idx == -1 and b"\n" in session.inbound_buffer:
+                # Permitir línea simple `GET /ruta\n` cuando no se envían cabeceras adicionales
+                first_nl = session.inbound_buffer.find(b"\n")
+                first_line = bytes(session.inbound_buffer[:first_nl]).rstrip(b"\r")
+                if b"HTTP/" not in first_line:
+                    end_idx = first_nl
+                    sep_len = 1
+
+            if end_idx != -1:
+                block = bytes(session.inbound_buffer[:end_idx])
+                del session.inbound_buffer[:end_idx + sep_len]
+                request_line = block.split(b"\n", 1)[0].rstrip(b"\r")
+                keep = self._dispatch_deception_line(session, request_line)
+                if keep:
+                    self._unregister_and_close(session.fd, "Respuesta HTTP emulada completada")
+                return False
+            return True
+
+        # Servicios orientados a líneas (SSH, Telnet, MySQL, etc.)
+        while b"\n" in session.inbound_buffer:
+            nl_idx = session.inbound_buffer.find(b"\n")
+            raw_line = bytes(session.inbound_buffer[:nl_idx]).rstrip(b"\r")
+            del session.inbound_buffer[:nl_idx + 1]
+
+            if len(raw_line) > self.max_line_bytes:
+                clipped = sanitize_captured_text(raw_line[:self.max_line_bytes], max_len=self.max_line_bytes)
+                if self.honeywall.storage is not None:
+                    self.honeywall.storage.record_event(
+                        event_type="DECEPTION_LINE_LIMIT_EXCEEDED",
+                        severity="warning",
+                        session_id=session.storage_id,
+                        device_id=f"net:{session.client_ip}:{session.mac}",
+                        ip=session.client_ip,
+                        mitre_technique="T1059",
+                        description=f"Línea recibida excede {self.max_line_bytes} bytes: {clipped}",
+                        metadata={
+                            "service": session.service,
+                            "dest_port": session.dest_port,
+                            "command": clipped,
+                        },
+                    )
+                if not self._send_deception_bytes(session, b"Line length limit exceeded.\r\n"):
+                    return False
+                continue
+
+            if not self._dispatch_deception_line(session, raw_line):
+                return False
+
+        if len(session.inbound_buffer) > self.max_line_bytes:
+            clipped = sanitize_captured_text(bytes(session.inbound_buffer[:self.max_line_bytes]), max_len=self.max_line_bytes)
+            session.inbound_buffer.clear()
+            if self.honeywall.storage is not None:
+                self.honeywall.storage.record_event(
+                    event_type="DECEPTION_LINE_LIMIT_EXCEEDED",
+                    severity="warning",
+                    session_id=session.storage_id,
+                    device_id=f"net:{session.client_ip}:{session.mac}",
+                    ip=session.client_ip,
+                    mitre_technique="T1059",
+                    description=f"Entrada sin salto de línea excede {self.max_line_bytes} bytes: {clipped}",
+                    metadata={
+                        "service": session.service,
+                        "dest_port": session.dest_port,
+                        "command": clipped,
+                    },
+                )
+            return self._send_deception_bytes(session, b"Line length limit exceeded.\r\n")
+
+        return True
+
     def _handle_client_read(self, client_fd: int):
         """
         Lee datos del cliente hasta vaciar el buffer (EAGAIN) en modo Edge-Triggered.
-        Procesa comandos simulados y alimenta el Honeypot.
+        Procesa comandos simulados con límites estrictos y sin ejecución ni egresos.
         """
         session = self.honeywall.sessions_by_fd.get(client_fd)
         if not session:
@@ -566,29 +873,12 @@ class EpollNetworkEngine:
                 session.bytes_in += len(data)
                 self.honeywall.stats["bytes_in_total"] += len(data)
                 session.last_activity = time.time()
+                session.inbound_buffer.extend(data)
 
-                # Simular respuesta de servicio realista
-                response = self._generate_deception_response(session, data)
-                if response:
-                    # Evaluar si la trama saliente respeta el umbral de contención perimetral
-                    if self.honeywall.evaluate_outbound_traffic(client_fd, frame_size=len(response)):
-                        try:
-                            session.sock.send(response)
-                        except (BlockingIOError, socket.error):
-                            # Si el socket no está listo para escribir, registrar EPOLLOUT
-                            self.epoll.modify(
-                                client_fd,
-                                select.EPOLLIN | select.EPOLLOUT | select.EPOLLET | select.EPOLLHUP | select.EPOLLERR
-                            )
-                    else:
-                        # Sesión mitigada por exceder límite de peticiones salientes
-                        try:
-                            self.epoll.unregister(client_fd)
-                        except OSError:
-                            pass
-                        break
+                if not self._process_session_buffer(session):
+                    break
 
-            except (BlockingIOError, socket.error):
+            except BlockingIOError:
                 # Socket vacío en modo Edge-Triggered (EAGAIN); lectura completa
                 break
             except (BrokenPipeError, ConnectionResetError) as e:
@@ -627,26 +917,9 @@ class EpollNetworkEngine:
 
     @staticmethod
     def _generate_deception_response(session: ConnectionSession, raw_data: bytes) -> bytes:
-        """Genera respuestas simuladas realistas para interactuar con atacantes o escáneres."""
-        text = raw_data.decode("utf-8", errors="ignore").strip()
-        logger.debug(f"[DECEPTION-PAYLOAD] IP={session.client_ip}:{session.client_port} -> {text!r}")
-
-        # Simulación de respuesta a escaneos o peticiones HTTP/SSH
-        if text.startswith("GET ") or text.startswith("POST "):
-            body = b"Apache/2.4.57 (Debian) Server Active\n"
-            return (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Server: Apache/2.4.57 (Debian)\r\n"
-                b"Content-Type: text/plain\r\n"
-                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-                + body
-            )
-        elif "id" in text or "whoami" in text:
-            return b"uid=1001(guest) gid=1001(guest) groups=1001(guest)\r\n"
-        elif "uname" in text:
-            return b"Linux kali-lab 6.6.9-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\r\n"
-        else:
-            return b"Access denied. HoneyGate security monitoring in progress.\r\n"
+        """Compatibilidad estática: delega a la tabla fija sin ejecución ni egresos."""
+        resp, _ = EmulatedServiceEngine.evaluate_input(session.service, raw_data, honeytokens=None)
+        return resp
 
     def start_background(self) -> threading.Thread:
         """Inicia el motor de red en un hilo separado de forma asíncrona."""

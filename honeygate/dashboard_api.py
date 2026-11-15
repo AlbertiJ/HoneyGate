@@ -21,6 +21,7 @@ from urllib.parse import urlparse, parse_qs
 from honeygate.honeywall_core import HoneyGateHoneywall
 from honeygate.forensic_monitor import ForensicAlertManager
 from honeygate.storage import HoneyGateStorage, VALID_SESSION_STATUSES, VALID_SEVERITIES
+from honeygate.deception import validate_honeytokens_config, validate_portal_template_config
 
 logger = logging.getLogger("HoneyGateAPI")
 
@@ -35,6 +36,8 @@ ALLOWED_CONFIG_FIELDS = {
     "egress_whitelist",
     "sybil_max_emails_per_device",
     "sybil_window_seconds",
+    "honeytokens",
+    "portal_template",
 }
 
 
@@ -183,6 +186,24 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                 </tbody>
             </table>
 
+            <h2 style="margin-top: 28px; color: var(--accent-yellow);">
+                <span>Eventos Forenses & Decepción (/api/events)</span>
+            </h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Hora</th>
+                        <th>IP</th>
+                        <th>Tipo / Servicio</th>
+                        <th>Honeytoken</th>
+                        <th>Detalle Capturado</th>
+                    </tr>
+                </thead>
+                <tbody id="events-table-body">
+                    <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Sin eventos forenses recientes.</td></tr>
+                </tbody>
+            </table>
+
             <h2 style="margin-top: 28px; color: var(--accent-red);">
                 <span>IPs en Lista de Aislamiento Activo</span>
             </h2>
@@ -327,15 +348,51 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                                 ? '<div style="margin-top:4px;"><span class="badge warn">mail sin verificar</span></div>'
                                 : '';
                             const reasonTxt = sess.observed_reason ? ('<div style="font-size:10px;color:#ffcc00;">' + escapeHtml(sess.observed_reason) + '</div>') : '';
+                            const htBadge = target.honeytoken_touched
+                                ? '<div style="margin-top:4px;"><span class="badge crit">' + escapeHtml(target.honeytoken_touched) + '</span></div>'
+                                : '';
                             tr.innerHTML = `
                                 <td>#${escapeHtml(item.id)}</td>
                                 <td><strong>${escapeHtml(origin.ip || '')}</strong><br><code style="font-size:11px;">${escapeHtml(origin.mac || '')}</code></td>
                                 <td><code style="font-size:11px;">${escapeHtml(origin.device_id || '')}</code></td>
-                                <td>${labelTxt}${mailBadge}${reasonTxt}</td>
+                                <td>${labelTxt}${mailBadge}${htBadge}${reasonTxt}</td>
                                 <td>${leaseTxt}</td>
                                 <td><span class="badge ${badgeCls}">${escapeHtml(st)}</span></td>
                             `;
                             psBody.appendChild(tr);
+                        });
+                    }
+                }
+
+                // Render eventos forenses (/api/events) estrictamente escapados (Anti-XSS)
+                const evRes = await fetch('/api/events?limit=25&offset=0', {
+                    headers: { 'X-Auth-Token': AUTH_TOKEN }
+                });
+                const evBody = document.getElementById('events-table-body');
+                if (evBody && evRes.ok) {
+                    const evPage = await evRes.json();
+                    evBody.innerHTML = '';
+                    const evItems = evPage.events || [];
+                    if (evItems.length === 0) {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = '<td colspan="5" style="text-align: center; color: #64748b; padding: 12px;">Sin eventos registrados en SQLite.</td>';
+                        evBody.appendChild(tr);
+                    } else {
+                        evItems.forEach(ev => {
+                            const tr = document.createElement('tr');
+                            const meta = ev.metadata || {};
+                            const svcTxt = meta.service ? (' (' + escapeHtml(meta.service) + ':' + escapeHtml(meta.dest_port || '') + ')') : '';
+                            const htTxt = meta.honeytoken_touched
+                                ? '<span class="badge crit">' + escapeHtml(meta.honeytoken_touched) + '</span>'
+                                : '—';
+                            tr.innerHTML = `
+                                <td><code style="font-size:11px;">${escapeHtml(ev.created_at || '')}</code></td>
+                                <td><code>${escapeHtml(ev.ip || '—')}</code></td>
+                                <td><span class="badge ${ev.severity === 'critical' ? 'crit' : (ev.severity === 'warning' ? 'warn' : 'safe')}">${escapeHtml(ev.event_type || '')}</span>${svcTxt}</td>
+                                <td>${htTxt}</td>
+                                <td style="word-break: break-all;">${escapeHtml(ev.description || '')}</td>
+                            `;
+                            evBody.appendChild(tr);
                         });
                     }
                 }
@@ -560,6 +617,18 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
             if not cls._is_strict_int(v) or not (10 <= v <= 86400):
                 return None, "El campo 'sybil_window_seconds' debe estar entre 10 y 86400"
             cleaned["sybil_window_seconds"] = v
+
+        if "honeytokens" in payload:
+            ht_cleaned, ht_err = validate_honeytokens_config(payload["honeytokens"])
+            if ht_err:
+                return None, ht_err
+            cleaned["honeytokens"] = ht_cleaned
+
+        if "portal_template" in payload:
+            tpl_cleaned, tpl_err = validate_portal_template_config(payload["portal_template"])
+            if tpl_err:
+                return None, tpl_err
+            cleaned["portal_template"] = tpl_cleaned
 
         return cleaned, None
 

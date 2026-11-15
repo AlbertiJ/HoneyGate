@@ -332,6 +332,10 @@ fun ForensicEventsScreen(
           if (event.mitreTechnique.isNotBlank()) {
             Text("• mitre_technique: ${event.mitreTechnique}", fontSize = 10.sp, color = WarningAmber)
           }
+          event.capturedCommand?.let { cmd ->
+            Text("• entrada_capturada (texto plano):", fontSize = 10.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(cmd, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = CyberCyan)
+          }
           event.honeytokenTouched?.let {
             Text("• honeytoken_touched: $it", fontSize = 10.sp, color = AlertRed, fontWeight = FontWeight.Bold)
           }
@@ -471,6 +475,9 @@ fun ForensicEventItem(
           }
           if (event.mitreTechnique.isNotBlank()) {
             Text("MITRE: ${event.mitreTechnique}", fontSize = 9.sp, color = WarningAmber)
+          }
+          event.capturedCommand?.let { cmd ->
+            Text("Entrada: $cmd", fontSize = 9.sp, color = CyberCyan, fontFamily = FontFamily.Monospace, maxLines = 2)
           }
           event.honeytokenTouched?.let {
             Text("Honeytoken: $it", fontSize = 9.sp, color = AlertRed, fontWeight = FontWeight.Bold)

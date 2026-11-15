@@ -25,9 +25,57 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from honeygate.honeywall_core import HoneyGateHoneywall
-from honeygate.storage import HoneyGateStorage
+from honeygate.storage import DEFAULT_PORTAL_TEMPLATE, HoneyGateStorage
 
 logger = logging.getLogger("HoneyGatePortal")
+
+PORTAL_FP_JS = """(function() {
+    function shaFallback(str) {
+        var h = 2166136261;
+        for (var i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = Math.imul(h, 16777619);
+        }
+        return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+    }
+    var scr = (window.screen ? (screen.width + 'x' + screen.height + 'x' + (screen.colorDepth || 0)) : '');
+    var tz = '';
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+    var lang = navigator.language || '';
+    var canvasVal = '';
+    try {
+        var c = document.createElement('canvas');
+        c.width = 180; c.height = 36;
+        var ctx = c.getContext('2d');
+        if (ctx) {
+            ctx.textBaseline = 'top';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('HoneyGate-FP', 2, 2);
+            canvasVal = shaFallback(c.toDataURL());
+        }
+    } catch (e) {}
+    var fontsVal = '';
+    try {
+        var probe = ['monospace', 'sans-serif', 'serif', 'Arial', 'Courier New'];
+        var c2 = document.createElement('canvas').getContext('2d');
+        if (c2) {
+            fontsVal = shaFallback(probe.map(function(f) {
+                c2.font = '16px ' + f;
+                return f + ':' + Math.round(c2.measureText('mmmmmmmmmmli').width);
+            }).join(','));
+        }
+    } catch (e) {}
+    function setAll(cls, val) {
+        var els = document.getElementsByClassName(cls);
+        for (var i = 0; i < els.length; i++) { els[i].value = val; }
+    }
+    setAll('fp-screen', scr);
+    setAll('fp-tz', tz);
+    setAll('fp-lang', lang);
+    setAll('fp-canvas', canvasVal);
+    setAll('fp-fonts', fontsVal);
+})();
+"""
 
 MAX_PORTAL_BODY_BYTES = 32768
 DEFAULT_LEASE_SEC = 300
@@ -314,11 +362,17 @@ def render_portal_html(
     challenge_id: str = "",
     otp_available: bool = False,
     otp_optional: bool = False,
+    portal_template: Optional[Dict[str, str]] = None,
 ) -> str:
     """
-    Genera el HTML del portal cautivo escapando toda entrada del visitante.
-    NUNCA incluye token de API, llamadas a /api/* ni valores sugeridos de lease/ancho de banda.
+    Genera el HTML estático del portal cautivo escapando toda entrada y texto configurable.
+    NUNCA incluye token de API, scripts inline, llamadas a /api/* ni valores sugeridos de lease/ancho de banda.
     """
+    tpl = portal_template if isinstance(portal_template, dict) else DEFAULT_PORTAL_TEMPLATE
+    safe_title = html.escape(str(tpl.get("title") or DEFAULT_PORTAL_TEMPLATE["title"]), quote=True)
+    safe_subtitle = html.escape(str(tpl.get("subtitle") or DEFAULT_PORTAL_TEMPLATE["subtitle"]), quote=True)
+    raw_footer = str(tpl.get("footer") or "").strip()
+    safe_footer = html.escape(raw_footer, quote=True)
     safe_email = html.escape(last_email, quote=True)
     safe_banner = html.escape(banner_message, quote=True)
     safe_challenge = html.escape(challenge_id, quote=True)
@@ -388,12 +442,18 @@ def render_portal_html(
         else "Solicitar código OTP por correo"
     )
 
+    footer_block = (
+        f'<div class="legal" id="portal-custom-footer">{safe_footer}</div>'
+        if safe_footer
+        else ""
+    )
+
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HoneyGate — Portal de Acceso de Red</title>
+    <title>{safe_title}</title>
     <style>
         body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f141c; color: #e2e8f0; margin: 0; padding: 24px; }}
         .container {{ max-width: 520px; margin: 24px auto; }}
@@ -422,8 +482,8 @@ def render_portal_html(
 <body>
     <div class="container">
         <div class="card">
-            <h1>HoneyGate — Portal Cautivo</h1>
-            <p class="sub">Acceso nominal de red. No se solicitan ni almacenan contraseñas.</p>
+            <h1>{safe_title}</h1>
+            <p class="sub">{safe_subtitle}</p>
             {banner_block}
             {result_block}
             <form method="POST" action="{primary_action}" id="portal-register-form">
@@ -444,57 +504,11 @@ def render_portal_html(
             <div class="legal">
                 <strong>Aviso Legal (Ley 25.326 y Ley 26.388):</strong> El uso de esta red está autorizado exclusivamente para fines operativos legítimos o auditorías autorizadas por el propietario de la infraestructura.
             </div>
+            {footer_block}
         </div>
         {otp_section}
     </div>
-    <script>
-        (function() {{
-            function shaFallback(str) {{
-                var h = 2166136261;
-                for (var i = 0; i < str.length; i++) {{
-                    h ^= str.charCodeAt(i);
-                    h = Math.imul(h, 16777619);
-                }}
-                return ('00000000' + (h >>> 0).toString(16)).slice(-8);
-            }}
-            var scr = (window.screen ? (screen.width + 'x' + screen.height + 'x' + (screen.colorDepth || 0)) : '');
-            var tz = '';
-            try {{ tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }} catch (e) {{}}
-            var lang = navigator.language || '';
-            var canvasVal = '';
-            try {{
-                var c = document.createElement('canvas');
-                c.width = 180; c.height = 36;
-                var ctx = c.getContext('2d');
-                if (ctx) {{
-                    ctx.textBaseline = 'top';
-                    ctx.font = '14px sans-serif';
-                    ctx.fillText('HoneyGate-FP', 2, 2);
-                    canvasVal = shaFallback(c.toDataURL());
-                }}
-            }} catch (e) {{}}
-            var fontsVal = '';
-            try {{
-                var probe = ['monospace', 'sans-serif', 'serif', 'Arial', 'Courier New'];
-                var c2 = document.createElement('canvas').getContext('2d');
-                if (c2) {{
-                    fontsVal = shaFallback(probe.map(function(f) {{
-                        c2.font = '16px ' + f;
-                        return f + ':' + Math.round(c2.measureText('mmmmmmmmmmli').width);
-                    }}).join(','));
-                }}
-            }} catch (e) {{}}
-            function setAll(cls, val) {{
-                var els = document.getElementsByClassName(cls);
-                for (var i = 0; i < els.length; i++) {{ els[i].value = val; }}
-            }}
-            setAll('fp-screen', scr);
-            setAll('fp-tz', tz);
-            setAll('fp-lang', lang);
-            setAll('fp-canvas', canvasVal);
-            setAll('fp-fonts', fontsVal);
-        }})();
-    </script>
+    <script src="/portal/fp.js"></script>
 </body>
 </html>
 """
@@ -977,14 +991,43 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _current_template(self) -> Dict[str, str]:
+        svc = self.portal_service
+        if svc is None:
+            return dict(DEFAULT_PORTAL_TEMPLATE)
+        return svc.storage.get_config().get("portal_template", DEFAULT_PORTAL_TEMPLATE)
+
     def _send_security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+            (
+                "default-src 'none'; "
+                "script-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self'; "
+                "font-src 'self'; "
+                "connect-src 'none'; "
+                "frame-ancestors 'none'; "
+                "form-action 'self'; "
+                "base-uri 'none'; "
+                "object-src 'none'"
+            ),
         )
         self.send_header("Cache-Control", "no-store")
+
+    def _send_js(self, js_text: str):
+        body = js_text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _send_json(self, data: Any, status_code: int = 200):
         body = json.dumps(data).encode("utf-8")
@@ -1050,8 +1093,13 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Recurso no disponible en el portal"}, status_code=404)
             return
 
+        if path == "/portal/fp.js":
+            self._send_js(PORTAL_FP_JS)
+            return
+
         if path in ("/", "/portal"):
             svc = self.portal_service
+            tpl = self._current_template()
             active, reason = svc.is_portal_active() if svc else (False, "Portal no inicializado")
             otp_avail = bool(os.environ.get("HONEYGATE_SMTP_HOST", "").strip()) or is_lab_mode_enabled()
             if not active:
@@ -1059,6 +1107,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                     banner_message=reason,
                     banner_is_error=True,
                     otp_available=False,
+                    portal_template=tpl,
                 )
                 self._send_html(html_body, status_code=503)
                 return
@@ -1066,6 +1115,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
             html_body = render_portal_html(
                 otp_available=otp_avail,
                 otp_optional=is_otp_optional_by_env(),
+                portal_template=tpl,
             )
             self._send_html(html_body, status_code=200)
             return
@@ -1082,6 +1132,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Ruta no encontrada en el portal"}, status_code=404)
             return
 
+        tpl = self._current_template()
         ok, payload = self._read_payload()
         if not ok or payload is None:
             if self._wants_json():
@@ -1092,6 +1143,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                         banner_message="Solicitud inválida",
                         banner_is_error=True,
                         otp_optional=is_otp_optional_by_env(),
+                        portal_template=tpl,
                     ),
                     status_code=400,
                 )
@@ -1121,6 +1173,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 challenge_id=result.get("challenge_id", ""),
                 otp_available=otp_avail,
                 otp_optional=otp_opt,
+                portal_template=tpl,
             )
         elif result.get("accepted"):
             banner = (
@@ -1135,6 +1188,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 last_result=result,
                 otp_available=otp_avail,
                 otp_optional=otp_opt,
+                portal_template=tpl,
             )
         else:
             html_body = render_portal_html(
@@ -1144,6 +1198,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 challenge_id=_clean_text(payload.get("challenge_id", ""), 128),
                 otp_available=otp_avail,
                 otp_optional=otp_opt,
+                portal_template=tpl,
             )
         self._send_html(html_body, status_code=status_code)
 

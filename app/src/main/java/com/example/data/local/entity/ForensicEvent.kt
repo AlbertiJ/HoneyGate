@@ -26,6 +26,7 @@ data class ForensicEvent(
   val severity: String = "info", // "info", "normal", "warning", "critical"
   val destinationTarget: String = "",
   val honeytokenTouched: String? = null,
+  val capturedCommand: String? = null,
   val mitreTechnique: String = "",
   val isCorrelated: Boolean = false,
   val dateFormatted: String = "", // created_at del daemon

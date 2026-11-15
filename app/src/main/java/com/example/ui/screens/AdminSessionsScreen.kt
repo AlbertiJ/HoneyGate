@@ -420,6 +420,11 @@ fun SessionItemCard(
         }
       }
 
+      session.honeytokenTouched?.let { ht ->
+        Spacer(modifier = Modifier.height(2.dp))
+        Text("Honeytoken ficticio accedido: $ht", fontSize = 9.sp, color = AlertRed, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+      }
+
       if (session.observedReason.isNotBlank()) {
         Text("observed_reason: ${session.observedReason}", fontSize = 9.sp, color = WarningAmber, fontWeight = FontWeight.SemiBold)
       }

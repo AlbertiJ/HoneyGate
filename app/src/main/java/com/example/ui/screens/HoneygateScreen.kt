@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.entity.HoneygateConfigEntity
 import com.example.data.remote.DaemonConfigUpdate
+import com.example.data.remote.HoneytokenDto
+import com.example.data.remote.PortalTemplateDto
+import com.example.data.repository.HoneyGateRepository
 import com.example.data.repository.Mode1AuthResult
 import com.example.data.repository.Mode2ActionResult
 import com.example.data.repository.OtpChallenge
@@ -204,6 +207,9 @@ private fun Mode1ControlScreen(
 ) {
   var maxEmailsInput by remember(config.sybilMaxEmailsPerDevice) { mutableStateOf(config.sybilMaxEmailsPerDevice.toString()) }
   var sybilWindowInput by remember(config.sybilWindowSeconds) { mutableStateOf(config.sybilWindowSeconds.toString()) }
+  var portalTitleInput by remember(config.portalTitle) { mutableStateOf(config.portalTitle) }
+  var portalSubtitleInput by remember(config.portalSubtitle) { mutableStateOf(config.portalSubtitle) }
+  var portalFooterInput by remember(config.portalFooter) { mutableStateOf(config.portalFooter) }
   var isBrandingExpanded by remember { mutableStateOf(false) }
   var companyNameInput by remember(config.companyName) { mutableStateOf(config.companyName) }
 
@@ -280,6 +286,66 @@ private fun Mode1ControlScreen(
             colors = ButtonDefaults.buttonColors(containerColor = CyberGreen, contentColor = Color.Black)
           ) {
             Text("Aplicar Reglas Anti-Sybil en Daemon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          }
+        }
+      }
+    }
+
+    // Plantilla estática CSP del portal (sin scripts ni recursos externos)
+    item {
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, CyberCyan.copy(alpha = 0.45f))
+      ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text("Plantilla Estática del Portal (PUT /api/config)", fontWeight = FontWeight.Bold, color = CyberCyan, fontSize = 12.sp)
+          Text(
+            "Servida con CSP estricta: solo texto plano escapado. El daemon rechaza HTML, scripts y recursos externos.",
+            fontSize = 9.sp,
+            color = TextMuted
+          )
+          OutlinedTextField(
+            value = portalTitleInput,
+            onValueChange = { portalTitleInput = it },
+            label = { Text("Título del portal", fontSize = 10.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("portal_template_title_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary)
+          )
+          OutlinedTextField(
+            value = portalSubtitleInput,
+            onValueChange = { portalSubtitleInput = it },
+            label = { Text("Subtítulo informativo", fontSize = 10.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("portal_template_subtitle_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary)
+          )
+          OutlinedTextField(
+            value = portalFooterInput,
+            onValueChange = { portalFooterInput = it },
+            label = { Text("Pie de aviso opcional", fontSize = 10.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("portal_template_footer_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary)
+          )
+          Button(
+            onClick = {
+              onPushDaemonConfig(
+                DaemonConfigUpdate(
+                  portalTemplate = PortalTemplateDto(
+                    title = portalTitleInput.trim().ifBlank { "HoneyGate — Portal Cautivo" },
+                    subtitle = portalSubtitleInput.trim().ifBlank { "Acceso nominal de red. No se solicitan ni almacenan contraseñas." },
+                    footer = portalFooterInput.trim()
+                  )
+                )
+              )
+            },
+            modifier = Modifier.fillMaxWidth().testTag("apply_portal_template_button"),
+            colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black)
+          ) {
+            Text("Guardar Plantilla Estática en Daemon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
           }
         }
       }
@@ -454,6 +520,10 @@ private fun Mode2ControlScreen(
 ) {
   var maxOutboundInput by remember(config.maxOutboundPerMinute) { mutableStateOf(config.maxOutboundPerMinute.toString()) }
   var whitelistInput by remember(config.allowedOutboundWhitelistCsv) { mutableStateOf(config.allowedOutboundWhitelistCsv) }
+  val configuredTokens = remember(config.honeytokensJson) { HoneyGateRepository.parseHoneytokensJson(config.honeytokensJson) }
+  var newHtName by remember { mutableStateOf("") }
+  var newHtValue by remember { mutableStateOf("") }
+  var newHtKind by remember { mutableStateOf("decoy") }
   var demoCmdText by remember { mutableStateOf("") }
 
   LazyColumn(
@@ -478,7 +548,7 @@ private fun Mode2ControlScreen(
           ) {
             Column(modifier = Modifier.weight(1f)) {
               Text("honeypot_enabled", fontSize = 11.sp, color = TextPrimary, fontFamily = FontFamily.Monospace)
-              Text("Activa servicios emulados sin conexiones salientes", fontSize = 9.sp, color = TextMuted)
+              Text("Activa servicios emulados sin conexiones salientes (127.0.0.1 por defecto)", fontSize = 9.sp, color = TextMuted)
             }
             Switch(
               checked = config.honeypotEnabled,
@@ -520,6 +590,104 @@ private fun Mode2ControlScreen(
             colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
           ) {
             Text("Guardar Política de Contención en Daemon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          }
+        }
+      }
+    }
+
+    item {
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, WarningAmber.copy(alpha = 0.5f))
+      ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text("Honeytokens Ficticios (PUT /api/config)", fontWeight = FontWeight.Bold, color = WarningAmber, fontSize = 12.sp)
+          Text(
+            "Solo valores claramente ficticios (dominios .invalid, .test o example.com). El daemon rechaza dominios reales conocidos o datos personales.",
+            fontSize = 9.sp,
+            color = TextMuted
+          )
+
+          if (configuredTokens.isEmpty()) {
+            Text("Sin honeytokens configurados en el daemon.", fontSize = 10.sp, color = TextSecondary)
+          } else {
+            configuredTokens.forEach { ht ->
+              Row(
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .clip(RoundedCornerShape(6.dp))
+                  .background(DarkSurfaceVariant)
+                  .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Column(modifier = Modifier.weight(1f)) {
+                  Text("${ht.name} (${ht.kind})", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = WarningAmber, fontFamily = FontFamily.Monospace)
+                  Text(ht.value, fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+                }
+                IconButton(
+                  onClick = {
+                    val remaining = configuredTokens.filterNot { it.name.equals(ht.name, ignoreCase = true) }
+                    onPushDaemonConfig(DaemonConfigUpdate(honeytokens = remaining))
+                  },
+                  modifier = Modifier.size(32.dp)
+                ) {
+                  Icon(Icons.Default.DeleteOutline, contentDescription = "Quitar honeytoken", tint = AlertRed, modifier = Modifier.size(16.dp))
+                }
+              }
+            }
+          }
+
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(
+              value = newHtName,
+              onValueChange = { newHtName = it },
+              label = { Text("Nombre (ej. FAKE_KEY_01)", fontSize = 9.sp) },
+              singleLine = true,
+              modifier = Modifier.weight(1f).testTag("honeytoken_name_input"),
+              textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+            )
+            OutlinedTextField(
+              value = newHtKind,
+              onValueChange = { newHtKind = it },
+              label = { Text("Tipo (decoy/api_key)", fontSize = 9.sp) },
+              singleLine = true,
+              modifier = Modifier.weight(0.7f),
+              textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+            )
+          }
+
+          OutlinedTextField(
+            value = newHtValue,
+            onValueChange = { newHtValue = it },
+            label = { Text("Valor ficticio (ej. decoy@example.invalid)", fontSize = 9.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("honeytoken_value_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+          )
+
+          Button(
+            onClick = {
+              val cleanName = newHtName.trim()
+              val cleanVal = newHtValue.trim()
+              if (cleanName.isNotEmpty() && cleanVal.isNotEmpty()) {
+                val updated = configuredTokens.filterNot { it.name.equals(cleanName, ignoreCase = true) } +
+                  HoneytokenDto(
+                    name = cleanName,
+                    value = cleanVal,
+                    kind = newHtKind.trim().lowercase().ifBlank { "decoy" }
+                  )
+                onPushDaemonConfig(DaemonConfigUpdate(honeytokens = updated))
+                newHtName = ""
+                newHtValue = ""
+              }
+            },
+            modifier = Modifier.fillMaxWidth().testTag("add_honeytoken_button"),
+            colors = ButtonDefaults.buttonColors(containerColor = WarningAmber, contentColor = Color.Black)
+          ) {
+            Text("Agregar Honeytoken Ficticio en Daemon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
           }
         }
       }

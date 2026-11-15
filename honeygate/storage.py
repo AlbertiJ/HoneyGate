@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_DB_PATH = os.path.join("data", "honeygate.db")
 
+DEFAULT_PORTAL_TEMPLATE: Dict[str, str] = {
+    "title": "HoneyGate — Portal Cautivo",
+    "subtitle": "Acceso nominal de red. No se solicitan ni almacenan contraseñas.",
+    "footer": "",
+}
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "mode": 1,
     "retention_days": 30,
@@ -27,6 +33,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "egress_whitelist": [],
     "sybil_max_emails_per_device": 3,
     "sybil_window_seconds": 600,
+    "honeytokens": [],
+    "portal_template": dict(DEFAULT_PORTAL_TEMPLATE),
 }
 
 VALID_SESSION_STATUSES = ("active", "closed", "isolated", "en_observacion")
@@ -70,6 +78,8 @@ class HoneyGateStorage:
                 egress_whitelist_json TEXT NOT NULL DEFAULT '[]',
                 sybil_max_emails_per_device INTEGER NOT NULL DEFAULT 3,
                 sybil_window_seconds INTEGER NOT NULL DEFAULT 600,
+                honeytokens_json TEXT NOT NULL DEFAULT '[]',
+                portal_template_json TEXT NOT NULL DEFAULT '{}',
                 updated_at REAL NOT NULL
             );
 
@@ -202,6 +212,16 @@ class HoneyGateStorage:
             cur.execute("ALTER TABLE sessions ADD COLUMN mail_verified INTEGER NOT NULL DEFAULT 1")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_browser_hash ON sessions(browser_hash)")
 
+        # Migración segura si existe una base SQLite creada antes de Fase 4
+        existing_cfg_cols = {
+            row["name"]
+            for row in cur.execute("PRAGMA table_info(daemon_config)").fetchall()
+        }
+        if "honeytokens_json" not in existing_cfg_cols:
+            cur.execute("ALTER TABLE daemon_config ADD COLUMN honeytokens_json TEXT NOT NULL DEFAULT '[]'")
+        if "portal_template_json" not in existing_cfg_cols:
+            cur.execute("ALTER TABLE daemon_config ADD COLUMN portal_template_json TEXT NOT NULL DEFAULT '{}'")
+
         row = cur.execute("SELECT id FROM daemon_config WHERE id = 1").fetchone()
         if row is None:
             cur.execute(
@@ -209,8 +229,9 @@ class HoneyGateStorage:
                 INSERT INTO daemon_config (
                     id, mode, retention_days, max_outbound_per_minute,
                     portal_enabled, honeypot_enabled, egress_whitelist_json,
-                    sybil_max_emails_per_device, sybil_window_seconds, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sybil_max_emails_per_device, sybil_window_seconds,
+                    honeytokens_json, portal_template_json, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     DEFAULT_CONFIG["mode"],
@@ -221,6 +242,8 @@ class HoneyGateStorage:
                     json.dumps(DEFAULT_CONFIG["egress_whitelist"]),
                     DEFAULT_CONFIG["sybil_max_emails_per_device"],
                     DEFAULT_CONFIG["sybil_window_seconds"],
+                    json.dumps(DEFAULT_CONFIG["honeytokens"]),
+                    json.dumps(DEFAULT_CONFIG["portal_template"]),
                     time.time(),
                 ),
             )
@@ -251,6 +274,23 @@ class HoneyGateStorage:
                     whitelist = []
             except Exception:
                 whitelist = []
+            try:
+                honeytokens = json.loads(row["honeytokens_json"])
+                if not isinstance(honeytokens, list):
+                    honeytokens = []
+            except Exception:
+                honeytokens = []
+            try:
+                raw_tpl = json.loads(row["portal_template_json"])
+                if not isinstance(raw_tpl, dict):
+                    raw_tpl = {}
+            except Exception:
+                raw_tpl = {}
+            portal_template = {
+                "title": str(raw_tpl.get("title") or DEFAULT_PORTAL_TEMPLATE["title"]),
+                "subtitle": str(raw_tpl.get("subtitle") or DEFAULT_PORTAL_TEMPLATE["subtitle"]),
+                "footer": str(raw_tpl.get("footer") or ""),
+            }
             return {
                 "mode": int(row["mode"]),
                 "retention_days": int(row["retention_days"]),
@@ -260,6 +300,8 @@ class HoneyGateStorage:
                 "egress_whitelist": whitelist,
                 "sybil_max_emails_per_device": int(row["sybil_max_emails_per_device"]),
                 "sybil_window_seconds": int(row["sybil_window_seconds"]),
+                "honeytokens": honeytokens,
+                "portal_template": portal_template,
                 "updated_at": float(row["updated_at"]),
             }
 
@@ -284,6 +326,8 @@ class HoneyGateStorage:
                     egress_whitelist_json = ?,
                     sybil_max_emails_per_device = ?,
                     sybil_window_seconds = ?,
+                    honeytokens_json = ?,
+                    portal_template_json = ?,
                     updated_at = ?
                 WHERE id = 1
                 """,
@@ -296,6 +340,8 @@ class HoneyGateStorage:
                     json.dumps(merged["egress_whitelist"]),
                     int(merged["sybil_max_emails_per_device"]),
                     int(merged["sybil_window_seconds"]),
+                    json.dumps(merged.get("honeytokens", [])),
+                    json.dumps(merged.get("portal_template", DEFAULT_PORTAL_TEMPLATE)),
                     now,
                 ),
             )
@@ -509,6 +555,22 @@ class HoneyGateStorage:
                 mitre_technique="T1078",
                 metadata={"reason": reason, "previous_status": row["status"]},
             )
+            return self.get_session(session_id)
+
+    def mark_session_honeytoken(
+        self,
+        session_id: int,
+        honeytoken_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Registra en SQLite el nombre del honeytoken ficticio accedido durante una sesión."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE sessions SET honeytoken_touched = ? WHERE id = ?",
+                (str(honeytoken_name)[:64], int(session_id)),
+            )
+            self._conn.commit()
+            if cur.rowcount <= 0:
+                return None
             return self.get_session(session_id)
 
     def list_sessions(

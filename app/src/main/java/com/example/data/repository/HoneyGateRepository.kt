@@ -12,7 +12,10 @@ import com.example.data.remote.DaemonEventDto
 import com.example.data.remote.DaemonSessionDto
 import com.example.data.remote.DaemonStatus
 import com.example.data.remote.HoneyGateDaemonClient
+import com.example.data.remote.HoneytokenDto
 import kotlinx.coroutines.flow.Flow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -390,6 +393,53 @@ class HoneyGateRepository(
   }
 
   companion object {
+    fun sanitizePlainText(raw: String?, maxLen: Int = 512): String {
+      if (raw.isNullOrEmpty()) return ""
+      val sb = StringBuilder(raw.length.coerceAtMost(maxLen))
+      for (ch in raw) {
+        val code = ch.code
+        when {
+          code == 9 -> sb.append(' ')
+          code >= 32 && code != 127 -> sb.append(ch)
+        }
+        if (sb.length >= maxLen) break
+      }
+      return sb.toString().trim()
+    }
+
+    fun parseHoneytokensJson(jsonStr: String): List<HoneytokenDto> {
+      return try {
+        val arr = JSONArray(jsonStr.ifBlank { "[]" })
+        buildList {
+          for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val name = obj.optString("name", "").trim()
+            val value = obj.optString("value", "").trim()
+            val kind = obj.optString("kind", "decoy").trim().ifEmpty { "decoy" }
+            if (name.isNotEmpty() && value.isNotEmpty()) {
+              add(HoneytokenDto(name = name, value = value, kind = kind))
+            }
+          }
+        }
+      } catch (_: Exception) {
+        emptyList()
+      }
+    }
+
+    fun serializeHoneytokens(tokens: List<HoneytokenDto>): String {
+      val arr = JSONArray()
+      tokens.forEach { ht ->
+        arr.put(
+          JSONObject().apply {
+            put("name", ht.name)
+            put("value", ht.value)
+            put("kind", ht.kind)
+          }
+        )
+      }
+      return arr.toString()
+    }
+
     fun mergeDaemonConfig(
       current: HoneygateConfigEntity,
       dto: DaemonConfigDto,
@@ -404,6 +454,10 @@ class HoneyGateRepository(
         allowedOutboundWhitelistCsv = dto.egressWhitelist.joinToString(", "),
         sybilMaxEmailsPerDevice = dto.sybilMaxEmailsPerDevice,
         sybilWindowSeconds = dto.sybilWindowSeconds,
+        honeytokensJson = serializeHoneytokens(dto.honeytokens),
+        portalTitle = dto.portalTemplate.title,
+        portalSubtitle = dto.portalTemplate.subtitle,
+        portalFooter = dto.portalTemplate.footer,
         configUpdatedAtSec = dto.updatedAt,
         lastSyncedAtMs = syncedAtMs
       )
@@ -413,18 +467,18 @@ class HoneyGateRepository(
       return MonitoredSessionEntity(
         daemonSessionId = dto.id,
         mode = dto.mode,
-        deviceId = dto.deviceId,
-        macAddress = dto.mac,
-        ipAddress = dto.ip,
+        deviceId = sanitizePlainText(dto.deviceId, 128),
+        macAddress = sanitizePlainText(dto.mac, 64),
+        ipAddress = sanitizePlainText(dto.ip, 64),
         clientPort = dto.clientPort,
-        deviceType = dto.deviceType,
-        browserFingerprint = dto.browserFingerprint,
-        networkFingerprint = dto.networkFingerprint,
-        dhcpFingerprint = dto.dhcpFingerprint,
-        destIp = dto.destIp,
+        deviceType = sanitizePlainText(dto.deviceType, 64),
+        browserFingerprint = sanitizePlainText(dto.browserFingerprint, 512),
+        networkFingerprint = sanitizePlainText(dto.networkFingerprint, 512),
+        dhcpFingerprint = sanitizePlainText(dto.dhcpFingerprint, 256),
+        destIp = sanitizePlainText(dto.destIp, 64),
         destPort = dto.destPort,
-        service = dto.service,
-        honeytokenTouched = dto.honeytokenTouched,
+        service = sanitizePlainText(dto.service, 64),
+        honeytokenTouched = dto.honeytokenTouched?.let { sanitizePlainText(it, 64) }?.takeIf { it.isNotEmpty() },
         connectedAt = (dto.startedAt * 1000.0).toLong(),
         endedAt = dto.endedAt?.let { (it * 1000.0).toLong() },
         lastActivity = ((dto.endedAt ?: dto.startedAt) * 1000.0).toLong(),
@@ -434,8 +488,8 @@ class HoneyGateRepository(
         dhcpLeaseSec = dto.dhcpLeaseSec,
         bandwidthKbps = dto.bandwidthKbps,
         mailVerified = dto.mailVerified,
-        visitorLabel = dto.visitorLabel ?: "",
-        observedReason = dto.observedReason ?: "",
+        visitorLabel = sanitizePlainText(dto.visitorLabel, 256),
+        observedReason = sanitizePlainText(dto.observedReason, 256),
         isMacBlocked = dto.status == "isolated",
         isInObservation = dto.status == "en_observacion",
         currentStatus = dto.status,
@@ -458,15 +512,16 @@ class HoneyGateRepository(
         eventType = uiBucket,
         rawEventType = dto.eventType,
         mode = dto.mode,
-        sourceIp = dto.ip ?: "",
-        macAddress = dto.metadataMac ?: "",
-        description = dto.description,
-        deviceId = dto.deviceId ?: "",
+        sourceIp = sanitizePlainText(dto.ip, 64),
+        macAddress = sanitizePlainText(dto.metadataMac, 64),
+        description = sanitizePlainText(dto.description, 512),
+        deviceId = sanitizePlainText(dto.deviceId, 128),
         category = dto.eventType,
         severity = dto.severity,
-        destinationTarget = dto.metadataTarget ?: "",
-        honeytokenTouched = dto.metadataHoneytoken,
-        mitreTechnique = dto.mitreTechnique ?: "",
+        destinationTarget = sanitizePlainText(dto.metadataTarget, 128),
+        honeytokenTouched = dto.metadataHoneytoken?.let { sanitizePlainText(it, 64) }?.takeIf { it.isNotEmpty() },
+        capturedCommand = dto.metadataCommand?.let { sanitizePlainText(it, 512) }?.takeIf { it.isNotEmpty() },
+        mitreTechnique = sanitizePlainText(dto.mitreTechnique, 64),
         isCorrelated = dto.sessionId != null,
         dateFormatted = dto.createdAt,
         isDemo = false

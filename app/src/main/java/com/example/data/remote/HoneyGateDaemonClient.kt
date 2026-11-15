@@ -24,6 +24,18 @@ data class DaemonStatus(
   val errorMessage: String? = null
 )
 
+data class HoneytokenDto(
+  val name: String,
+  val value: String,
+  val kind: String = "decoy"
+)
+
+data class PortalTemplateDto(
+  val title: String = "HoneyGate — Portal Cautivo",
+  val subtitle: String = "Acceso nominal de red. No se solicitan ni almacenan contraseñas.",
+  val footer: String = ""
+)
+
 data class DaemonConfigDto(
   val mode: Int,
   val retentionDays: Int,
@@ -33,6 +45,8 @@ data class DaemonConfigDto(
   val egressWhitelist: List<String>,
   val sybilMaxEmailsPerDevice: Int,
   val sybilWindowSeconds: Int,
+  val honeytokens: List<HoneytokenDto> = emptyList(),
+  val portalTemplate: PortalTemplateDto = PortalTemplateDto(),
   val updatedAt: Double
 )
 
@@ -44,7 +58,9 @@ data class DaemonConfigUpdate(
   val honeypotEnabled: Boolean? = null,
   val egressWhitelist: List<String>? = null,
   val sybilMaxEmailsPerDevice: Int? = null,
-  val sybilWindowSeconds: Int? = null
+  val sybilWindowSeconds: Int? = null,
+  val honeytokens: List<HoneytokenDto>? = null,
+  val portalTemplate: PortalTemplateDto? = null
 ) {
   fun toJson(): JSONObject = JSONObject().apply {
     mode?.let { put("mode", it) }
@@ -55,6 +71,29 @@ data class DaemonConfigUpdate(
     egressWhitelist?.let { put("egress_whitelist", JSONArray(it)) }
     sybilMaxEmailsPerDevice?.let { put("sybil_max_emails_per_device", it) }
     sybilWindowSeconds?.let { put("sybil_window_seconds", it) }
+    honeytokens?.let { tokens ->
+      val arr = JSONArray()
+      tokens.forEach { ht ->
+        arr.put(
+          JSONObject().apply {
+            put("name", ht.name)
+            put("value", ht.value)
+            put("kind", ht.kind)
+          }
+        )
+      }
+      put("honeytokens", arr)
+    }
+    portalTemplate?.let { tpl ->
+      put(
+        "portal_template",
+        JSONObject().apply {
+          put("title", tpl.title)
+          put("subtitle", tpl.subtitle)
+          put("footer", tpl.footer)
+        }
+      )
+    }
   }
 }
 
@@ -107,7 +146,8 @@ data class DaemonEventDto(
   val description: String,
   val metadataMac: String?,
   val metadataHoneytoken: String?,
-  val metadataTarget: String?
+  val metadataTarget: String?,
+  val metadataCommand: String? = null
 )
 
 data class DaemonEventsPage(
@@ -154,6 +194,25 @@ class HoneyGateDaemonClient {
           if (item.isNotEmpty()) add(item)
         }
       }
+      val htArray = obj.optJSONArray("honeytokens") ?: JSONArray()
+      val honeytokens = buildList {
+        for (i in 0 until htArray.length()) {
+          val htObj = htArray.optJSONObject(i) ?: continue
+          val name = htObj.optString("name", "").trim()
+          val value = htObj.optString("value", "").trim()
+          val kind = htObj.optString("kind", "decoy").trim().ifEmpty { "decoy" }
+          if (name.isNotEmpty() && value.isNotEmpty()) {
+            add(HoneytokenDto(name = name, value = value, kind = kind))
+          }
+        }
+      }
+      val tplObj = obj.optJSONObject("portal_template")
+      val portalTemplate = PortalTemplateDto(
+        title = tplObj?.optString("title", "")?.takeIf { it.isNotBlank() } ?: "HoneyGate — Portal Cautivo",
+        subtitle = tplObj?.optString("subtitle", "")?.takeIf { it.isNotBlank() }
+          ?: "Acceso nominal de red. No se solicitan ni almacenan contraseñas.",
+        footer = tplObj?.optString("footer", "") ?: ""
+      )
       return DaemonConfigDto(
         mode = obj.optInt("mode", 1),
         retentionDays = obj.optInt("retention_days", 30),
@@ -163,6 +222,8 @@ class HoneyGateDaemonClient {
         egressWhitelist = whitelist,
         sybilMaxEmailsPerDevice = obj.optInt("sybil_max_emails_per_device", 3),
         sybilWindowSeconds = obj.optInt("sybil_window_seconds", 600),
+        honeytokens = honeytokens,
+        portalTemplate = portalTemplate,
         updatedAt = obj.optDouble("updated_at", 0.0)
       )
     }
@@ -247,7 +308,8 @@ class HoneyGateDaemonClient {
               description = item.optStringOrEmpty("description"),
               metadataMac = meta.optStringOrNull("mac"),
               metadataHoneytoken = meta.optStringOrNull("honeytoken_touched"),
-              metadataTarget = targetStr
+              metadataTarget = targetStr,
+              metadataCommand = meta.optStringOrNull("command")
             )
           )
         }

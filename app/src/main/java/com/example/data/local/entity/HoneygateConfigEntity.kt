@@ -20,6 +20,10 @@ data class HoneygateConfigEntity(
   val allowedOutboundWhitelistCsv: String = "",
   val sybilMaxEmailsPerDevice: Int = 3,
   val sybilWindowSeconds: Int = 600,
+  val honeytokensJson: String = "[]",
+  val portalTitle: String = "HoneyGate — Portal Cautivo",
+  val portalSubtitle: String = "Acceso nominal de red. No se solicitan ni almacenan contraseñas.",
+  val portalFooter: String = "",
   val configUpdatedAtSec: Double = 0.0,
 
   // Branding local del panel (no se envía como campo extra a PUT /api/config)

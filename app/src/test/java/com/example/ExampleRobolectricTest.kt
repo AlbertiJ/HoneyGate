@@ -191,4 +191,70 @@ class ExampleRobolectricTest {
     assertEquals(0, repository.allSessions.first().size)
     assertEquals(0, repository.allEvents.first().size)
   }
+
+  @Test
+  fun `parse and sanitize fase4 honeytokens portal template and captured commands`() {
+    val cfgJson = """
+      {
+        "mode": 3,
+        "retention_days": 30,
+        "max_outbound_per_minute": 10,
+        "portal_enabled": true,
+        "honeypot_enabled": true,
+        "egress_whitelist": [],
+        "sybil_max_emails_per_device": 3,
+        "sybil_window_seconds": 600,
+        "honeytokens": [
+          {"name": "FAKE_KEY_01", "value": "decoy@example.invalid", "kind": "email"}
+        ],
+        "portal_template": {
+          "title": "Portal Lab",
+          "subtitle": "Subtitulo seguro",
+          "footer": "Pie interno"
+        },
+        "updated_at": 1700000100.0
+      }
+    """.trimIndent()
+    val cfg = HoneyGateDaemonClient.parseConfigJson(cfgJson)
+    assertEquals(1, cfg.honeytokens.size)
+    assertEquals("FAKE_KEY_01", cfg.honeytokens[0].name)
+    assertEquals("decoy@example.invalid", cfg.honeytokens[0].value)
+    assertEquals("Portal Lab", cfg.portalTemplate.title)
+    assertEquals("Pie interno", cfg.portalTemplate.footer)
+
+    val evJson = """
+      {
+        "events": [
+          {
+            "id": 105,
+            "session_id": 7,
+            "timestamp": 1700000200.0,
+            "created_at": "2026-11-14 12:00:00",
+            "mode": 2,
+            "device_id": "net:127.0.0.1:00:00:00:00:00:00",
+            "ip": "127.0.0.1",
+            "event_type": "HONEYTOKEN_TOUCHED",
+            "severity": "critical",
+            "mitre_technique": "T1552",
+            "description": "Honeytoken ficticio accedido\u0007\u001b[31m",
+            "metadata": {
+              "service": "ssh",
+              "dest_port": 2222,
+              "honeytoken_touched": "FAKE_KEY_01",
+              "command": "cat .env\u0007<script>alert(1)</script>"
+            }
+          }
+        ],
+        "total": 1,
+        "limit": 50,
+        "offset": 0
+      }
+    """.trimIndent()
+    val evPage = HoneyGateDaemonClient.parseEventsPageJson(evJson)
+    val entity = HoneyGateRepository.mapEventDtoToEntity(evPage.events[0])
+    assertEquals("FAKE_KEY_01", entity.honeytokenTouched)
+    assertEquals("cat .env<script>alert(1)</script>", entity.capturedCommand)
+    assertFalse(entity.description.contains("\u0007"))
+    assertFalse(entity.capturedCommand!!.contains("\u0007"))
+  }
 }

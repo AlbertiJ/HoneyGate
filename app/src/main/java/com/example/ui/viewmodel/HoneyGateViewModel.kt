@@ -202,7 +202,11 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
           portalEnabled = update.portalEnabled ?: cfg.portalEnabled,
           honeypotEnabled = update.honeypotEnabled ?: cfg.honeypotEnabled,
           maxOutboundPerMinute = update.maxOutboundPerMinute ?: cfg.maxOutboundPerMinute,
-          retentionDays = update.retentionDays ?: cfg.retentionDays
+          retentionDays = update.retentionDays ?: cfg.retentionDays,
+          honeytokensJson = update.honeytokens?.let { HoneyGateRepository.serializeHoneytokens(it) } ?: cfg.honeytokensJson,
+          portalTitle = update.portalTemplate?.title ?: cfg.portalTitle,
+          portalSubtitle = update.portalTemplate?.subtitle ?: cfg.portalSubtitle,
+          portalFooter = update.portalTemplate?.footer ?: cfg.portalFooter
         )
         repository.saveHoneygateConfig(localDemo)
         _daemonSyncMessage.value = "[DEMO] Cambio aplicado solo en caché local."
@@ -445,6 +449,9 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
         events.take(20).forEach { e ->
           val timeStr = e.dateFormatted.ifBlank { SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(e.timestamp)) }
           appendLine(" [$timeStr] [${e.severity.uppercase()}] ${e.rawEventType.ifBlank { e.category }}: ${e.description}")
+          if (!e.capturedCommand.isNullOrBlank()) {
+            appendLine("   Entrada capturada (texto plano): ${e.capturedCommand}")
+          }
           if (e.mitreTechnique.isNotBlank()) {
             appendLine("   MITRE: ${e.mitreTechnique}")
           }

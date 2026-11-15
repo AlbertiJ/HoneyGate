@@ -39,10 +39,11 @@ def main():
 
     honeywall = HoneyGateHoneywall(alert_callback=on_honeywall_alert, storage=storage)
 
-    # 2. Inicializar Motor de Sockets epoll en Puertos Altos (>1024)
-    # 2222 (SSH Simulado), 8080 (HTTP Simulado), 8443 (HTTPS Simulado)
-    simulation_ports = [2222, 8080, 8443]
-    epoll_engine = EpollNetworkEngine(ports=simulation_ports, honeywall=honeywall)
+    # 2. Inicializar Motor de Sockets epoll en Puertos Altos (>1024) en 127.0.0.1 por defecto
+    # 2222 (SSH), 2323 (Telnet), 8080 (HTTP), 8443 (HTTPS), 3306 (MySQL)
+    epoll_host = os.environ.get("HONEYGATE_EPOLL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    simulation_ports = [2222, 2323, 8080, 8443, 3306]
+    epoll_engine = EpollNetworkEngine(ports=simulation_ports, honeywall=honeywall, host=epoll_host)
     epoll_engine.start_background()
 
     # 3. Inicializar Monitor Forense inotify para logs locales y cowrie.json
