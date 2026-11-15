@@ -15,6 +15,8 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from honeygate.mitre import get_mitre_engine
+
 
 DEFAULT_DB_PATH = os.path.join("data", "honeygate.db")
 
@@ -552,7 +554,7 @@ class HoneyGateStorage:
                 mode=int(row["mode"]),
                 device_id=row["device_id"],
                 ip=row["ip"],
-                mitre_technique="T1078",
+                mitre_technique=get_mitre_engine().resolve_event("SESSION_OBSERVED"),
                 metadata={"reason": reason, "previous_status": row["status"]},
             )
             return self.get_session(session_id)
@@ -1026,3 +1028,267 @@ class HoneyGateStorage:
             )
             self._conn.commit()
             return True, "OK"
+
+    # ------------------------------------------------------------------
+    # Privacidad y Retención (Fase 5 — Ley 25.326 AR)
+    # ------------------------------------------------------------------
+
+    def purge_expired_retention(
+        self,
+        retention_days: Optional[int] = None,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Elimina sesiones, eventos, desafíos OTP, registros del portal y contadores
+        anteriores a `retention_days` y deja un evento de auditoría sin datos personales.
+        """
+        with self._lock:
+            days = int(
+                retention_days
+                if retention_days is not None
+                else self.get_config()["retention_days"]
+            )
+            if days < 1 or days > 3650:
+                raise ValueError("retention_days debe estar entre 1 y 3650")
+
+            now = float(now_ts if now_ts is not None else time.time())
+            cutoff = now - (float(days) * 86400.0)
+
+            expired_rows = self._conn.execute(
+                "SELECT id FROM sessions WHERE COALESCE(ended_at, started_at) < ?",
+                (cutoff,),
+            ).fetchall()
+            expired_session_ids = [int(r["id"]) for r in expired_rows]
+
+            if expired_session_ids:
+                placeholders = ",".join("?" for _ in expired_session_ids)
+                ev_cur = self._conn.execute(
+                    f"DELETE FROM events WHERE timestamp < ? OR session_id IN ({placeholders})",
+                    tuple([cutoff] + expired_session_ids),
+                )
+                reg_cur = self._conn.execute(
+                    f"DELETE FROM portal_registrations WHERE created_at < ? OR session_id IN ({placeholders})",
+                    tuple([cutoff] + expired_session_ids),
+                )
+                sess_cur = self._conn.execute(
+                    f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                    tuple(expired_session_ids),
+                )
+            else:
+                ev_cur = self._conn.execute(
+                    "DELETE FROM events WHERE timestamp < ?",
+                    (cutoff,),
+                )
+                reg_cur = self._conn.execute(
+                    "DELETE FROM portal_registrations WHERE created_at < ?",
+                    (cutoff,),
+                )
+                sess_cur = self._conn.execute("DELETE FROM sessions WHERE 1 = 0")
+
+            otp_cur = self._conn.execute(
+                "DELETE FROM otp_challenges WHERE created_at < ?",
+                (cutoff,),
+            )
+            rl_cur = self._conn.execute(
+                "DELETE FROM portal_rate_limits WHERE created_at < ?",
+                (cutoff,),
+            )
+            self._conn.commit()
+
+            counts = {
+                "retention_days": days,
+                "sessions_deleted": int(sess_cur.rowcount),
+                "events_deleted": int(ev_cur.rowcount),
+                "otp_challenges_deleted": int(otp_cur.rowcount),
+                "portal_registrations_deleted": int(reg_cur.rowcount),
+                "rate_limits_deleted": int(rl_cur.rowcount),
+            }
+
+            # Evento de auditoría estrictamente SIN datos personales
+            self.record_event(
+                event_type="RETENTION_PURGE",
+                severity="info",
+                device_id="",
+                ip="",
+                description=(
+                    f"Purga por retención ejecutada (>={days} días): "
+                    f"{counts['sessions_deleted']} sesiones, "
+                    f"{counts['events_deleted']} eventos y "
+                    f"{counts['otp_challenges_deleted']} desafíos OTP eliminados"
+                ),
+                metadata=counts,
+            )
+            return counts
+
+    def purge_visitor_data(
+        self,
+        email: Optional[str] = None,
+        email_hash: Optional[str] = None,
+        device_id: Optional[str] = None,
+        ip: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Elimina sesiones, eventos y desafíos OTP asociados a un visitante
+        y registra un evento de auditoría sin ningún dato personal (ni correo, IP, MAC ni device_id).
+        """
+        clean_email = email.strip().lower() if isinstance(email, str) and email.strip() else None
+        clean_hash = email_hash.strip().lower() if isinstance(email_hash, str) and email_hash.strip() else None
+        clean_dev = device_id.strip() if isinstance(device_id, str) and device_id.strip() else None
+        clean_ip = ip.strip() if isinstance(ip, str) and ip.strip() else None
+
+        if not any((clean_email, clean_hash, clean_dev, clean_ip)):
+            raise ValueError("Debe especificar al menos un identificador (email, device_id o ip)")
+
+        with self._lock:
+            matched_session_ids = set()
+
+            sess_clauses: List[str] = []
+            sess_params: List[Any] = []
+            if clean_email:
+                sess_clauses.append("LOWER(visitor_label) = ?")
+                sess_params.append(clean_email)
+            if clean_dev:
+                sess_clauses.append("device_id = ?")
+                sess_params.append(clean_dev)
+            if clean_ip:
+                sess_clauses.append("ip = ?")
+                sess_params.append(clean_ip)
+
+            if sess_clauses:
+                rows = self._conn.execute(
+                    f"SELECT id FROM sessions WHERE {' OR '.join(sess_clauses)}",
+                    tuple(sess_params),
+                ).fetchall()
+                matched_session_ids.update(int(r["id"]) for r in rows)
+
+            if clean_hash:
+                reg_sess_rows = self._conn.execute(
+                    "SELECT session_id FROM portal_registrations WHERE email_hash = ? AND session_id IS NOT NULL",
+                    (clean_hash,),
+                ).fetchall()
+                matched_session_ids.update(int(r["session_id"]) for r in reg_sess_rows)
+
+            ev_clauses: List[str] = []
+            ev_params: List[Any] = []
+            if matched_session_ids:
+                placeholders = ",".join("?" for _ in matched_session_ids)
+                ev_clauses.append(f"session_id IN ({placeholders})")
+                ev_params.extend(sorted(matched_session_ids))
+            if clean_dev:
+                ev_clauses.append("device_id = ?")
+                ev_params.append(clean_dev)
+            if clean_ip:
+                ev_clauses.append("ip = ?")
+                ev_params.append(clean_ip)
+
+            events_deleted = 0
+            if ev_clauses:
+                ev_cur = self._conn.execute(
+                    f"DELETE FROM events WHERE {' OR '.join(ev_clauses)}",
+                    tuple(ev_params),
+                )
+                events_deleted = int(ev_cur.rowcount)
+
+            otp_clauses: List[str] = []
+            otp_params: List[Any] = []
+            if clean_hash:
+                otp_clauses.append("email_hash = ?")
+                otp_params.append(clean_hash)
+            if clean_dev:
+                otp_clauses.append("device_id = ?")
+                otp_params.append(clean_dev)
+            if clean_ip:
+                otp_clauses.append("ip = ?")
+                otp_params.append(clean_ip)
+
+            otp_deleted = 0
+            if otp_clauses:
+                otp_cur = self._conn.execute(
+                    f"DELETE FROM otp_challenges WHERE {' OR '.join(otp_clauses)}",
+                    tuple(otp_params),
+                )
+                otp_deleted = int(otp_cur.rowcount)
+
+            reg_clauses: List[str] = []
+            reg_params: List[Any] = []
+            if matched_session_ids:
+                placeholders = ",".join("?" for _ in matched_session_ids)
+                reg_clauses.append(f"session_id IN ({placeholders})")
+                reg_params.extend(sorted(matched_session_ids))
+            if clean_hash:
+                reg_clauses.append("email_hash = ?")
+                reg_params.append(clean_hash)
+            if clean_dev:
+                reg_clauses.append("device_id = ?")
+                reg_params.append(clean_dev)
+            if clean_ip:
+                reg_clauses.append("ip = ?")
+                reg_params.append(clean_ip)
+
+            regs_deleted = 0
+            if reg_clauses:
+                reg_cur = self._conn.execute(
+                    f"DELETE FROM portal_registrations WHERE {' OR '.join(reg_clauses)}",
+                    tuple(reg_params),
+                )
+                regs_deleted = int(reg_cur.rowcount)
+
+            rl_clauses: List[str] = []
+            rl_params: List[Any] = []
+            if clean_hash:
+                rl_clauses.append("(key_type = 'email' AND key_value = ?)")
+                rl_params.append(clean_hash)
+            if clean_ip:
+                rl_clauses.append("(key_type = 'ip' AND key_value = ?)")
+                rl_params.append(clean_ip)
+
+            rl_deleted = 0
+            if rl_clauses:
+                rl_cur = self._conn.execute(
+                    f"DELETE FROM portal_rate_limits WHERE {' OR '.join(rl_clauses)}",
+                    tuple(rl_params),
+                )
+                rl_deleted = int(rl_cur.rowcount)
+
+            sessions_deleted = 0
+            if matched_session_ids:
+                placeholders = ",".join("?" for _ in matched_session_ids)
+                sess_cur = self._conn.execute(
+                    f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                    tuple(sorted(matched_session_ids)),
+                )
+                sessions_deleted = int(sess_cur.rowcount)
+
+            self._conn.commit()
+
+            criteria_types: List[str] = []
+            if clean_email or clean_hash:
+                criteria_types.append("email")
+            if clean_dev:
+                criteria_types.append("device_id")
+            if clean_ip:
+                criteria_types.append("ip")
+
+            counts = {
+                "criteria_types": criteria_types,
+                "sessions_deleted": sessions_deleted,
+                "events_deleted": events_deleted,
+                "otp_challenges_deleted": otp_deleted,
+                "portal_registrations_deleted": regs_deleted,
+                "rate_limits_deleted": rl_deleted,
+            }
+
+            # Evento de auditoría estrictamente SIN datos personales
+            self.record_event(
+                event_type="VISITOR_DATA_PURGED",
+                severity="info",
+                device_id="",
+                ip="",
+                description=(
+                    f"Borrado de datos de visitante ejecutado: "
+                    f"{sessions_deleted} sesiones, {events_deleted} eventos y "
+                    f"{otp_deleted} desafíos OTP eliminados"
+                ),
+                metadata=counts,
+            )
+            return counts

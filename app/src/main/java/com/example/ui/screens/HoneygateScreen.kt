@@ -50,7 +50,9 @@ fun HoneygateScreen(
   onRunDemoRedTeamCommand: (canaryUser: String, command: String) -> Unit,
   onClearMode1Result: () -> Unit,
   onUpdateBranding: (name: String, primary: String, accent: String) -> Unit,
-  onOpenDaemonSettings: () -> Unit = {}
+  onOpenDaemonSettings: () -> Unit = {},
+  onPurgeRetentionConfirmed: () -> Unit = {},
+  onForgetVisitorConfirmed: (email: String?, deviceId: String?, ip: String?) -> Unit = { _, _, _ -> }
 ) {
   var selectedGateMode by remember(config.gateMode) { mutableIntStateOf(config.gateMode) }
 
@@ -148,7 +150,9 @@ fun HoneygateScreen(
         isOnline = isOnline,
         onPushDaemonConfig = onPushDaemonConfig,
         onToggleDemoMode = onToggleDemoMode,
-        onOpenDaemonSettings = onOpenDaemonSettings
+        onOpenDaemonSettings = onOpenDaemonSettings,
+        onPurgeRetentionConfirmed = onPurgeRetentionConfirmed,
+        onForgetVisitorConfirmed = onForgetVisitorConfirmed
       )
     }
   }
@@ -765,9 +769,16 @@ private fun Mode3ControlScreen(
   isOnline: Boolean,
   onPushDaemonConfig: (DaemonConfigUpdate) -> Unit,
   onToggleDemoMode: (Boolean) -> Unit,
-  onOpenDaemonSettings: () -> Unit
+  onOpenDaemonSettings: () -> Unit,
+  onPurgeRetentionConfirmed: () -> Unit,
+  onForgetVisitorConfirmed: (email: String?, deviceId: String?, ip: String?) -> Unit
 ) {
   var retentionInput by remember(config.retentionDays) { mutableStateOf(config.retentionDays.toString()) }
+  var forgetEmailInput by remember { mutableStateOf("") }
+  var forgetDeviceIdInput by remember { mutableStateOf("") }
+  var forgetIpInput by remember { mutableStateOf("") }
+  var showRetentionDialog by remember { mutableStateOf(false) }
+  var showForgetVisitorDialog by remember { mutableStateOf(false) }
 
   LazyColumn(
     modifier = Modifier.fillMaxSize(),
@@ -863,11 +874,152 @@ private fun Mode3ControlScreen(
     }
 
     item {
+      Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AlertRed.copy(alpha = 0.45f))
+      ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text("Privacidad y Borrado de Datos (Ley 25.326)", fontWeight = FontWeight.Bold, color = AlertRed, fontSize = 12.sp)
+          Text(
+            "Elimina sesiones, eventos y desafíos OTP asociados en SQLite dejando un registro de auditoría sin datos personales.",
+            fontSize = 10.sp,
+            color = TextSecondary
+          )
+          Button(
+            onClick = { showRetentionDialog = true },
+            colors = ButtonDefaults.buttonColors(containerColor = WarningAmber, contentColor = Color.Black),
+            modifier = Modifier
+              .fillMaxWidth()
+              .minimumInteractiveComponentSize()
+              .testTag("retention_purge_button")
+          ) {
+            Text("Purgar registros expirados (>${config.retentionDays}d)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          }
+
+          Divider(color = DarkBorder)
+
+          Text("Borrar datos de un visitante", fontWeight = FontWeight.SemiBold, color = TextPrimary, fontSize = 11.sp)
+          OutlinedTextField(
+            value = forgetEmailInput,
+            onValueChange = { forgetEmailInput = it },
+            label = { Text("Correo del visitante (opcional)", fontSize = 10.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("forget_email_input"),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary)
+          )
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(
+              value = forgetDeviceIdInput,
+              onValueChange = { forgetDeviceIdInput = it },
+              label = { Text("device_id", fontSize = 10.sp) },
+              singleLine = true,
+              modifier = Modifier.weight(1f).testTag("forget_device_id_input"),
+              textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+            )
+            OutlinedTextField(
+              value = forgetIpInput,
+              onValueChange = { forgetIpInput = it },
+              label = { Text("IP", fontSize = 10.sp) },
+              singleLine = true,
+              modifier = Modifier.weight(0.9f).testTag("forget_ip_input"),
+              textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimary)
+            )
+          }
+          val hasForgetCriteria = forgetEmailInput.isNotBlank() || forgetDeviceIdInput.isNotBlank() || forgetIpInput.isNotBlank()
+          Button(
+            onClick = { showForgetVisitorDialog = true },
+            enabled = hasForgetCriteria,
+            colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White),
+            modifier = Modifier
+              .fillMaxWidth()
+              .minimumInteractiveComponentSize()
+              .testTag("forget_visitor_button")
+          ) {
+            Text("Borrar Datos del Visitante", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          }
+        }
+      }
+    }
+
+    item {
       DemoModeControlCard(
         demoEnabled = config.demoModeEnabled,
         onToggleDemoMode = onToggleDemoMode
       )
     }
+  }
+
+  if (showRetentionDialog) {
+    AlertDialog(
+      onDismissRequest = { showRetentionDialog = false },
+      containerColor = DarkSurface,
+      titleContentColor = WarningAmber,
+      title = { Text("Confirmar Purga por Retención", fontSize = 13.sp, fontWeight = FontWeight.Bold) },
+      text = {
+        Text(
+          "¿Confirmás eliminar permanentemente sesiones, eventos y desafíos OTP anteriores a ${config.retentionDays} días? Se registrará un evento de auditoría sin datos personales.",
+          fontSize = 11.sp,
+          color = TextPrimary
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            showRetentionDialog = false
+            onPurgeRetentionConfirmed()
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = WarningAmber, contentColor = Color.Black)
+        ) {
+          Text("Confirmar Purga", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showRetentionDialog = false }) {
+          Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
+        }
+      }
+    )
+  }
+
+  if (showForgetVisitorDialog) {
+    AlertDialog(
+      onDismissRequest = { showForgetVisitorDialog = false },
+      containerColor = DarkSurface,
+      titleContentColor = AlertRed,
+      title = { Text("Confirmar Borrado de Visitante", fontSize = 13.sp, fontWeight = FontWeight.Bold) },
+      text = {
+        Text(
+          "¿Confirmás eliminar todas las sesiones, eventos y desafíos OTP asociados al visitante indicado? Quedará solo un evento de auditoría sin datos personales.",
+          fontSize = 11.sp,
+          color = TextPrimary
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            showForgetVisitorDialog = false
+            onForgetVisitorConfirmed(
+              forgetEmailInput.trim().ifBlank { null },
+              forgetDeviceIdInput.trim().ifBlank { null },
+              forgetIpInput.trim().ifBlank { null }
+            )
+            forgetEmailInput = ""
+            forgetDeviceIdInput = ""
+            forgetIpInput = ""
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
+        ) {
+          Text("Confirmar Borrado", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showForgetVisitorDialog = false }) {
+          Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
+        }
+      }
+    )
   }
 }
 

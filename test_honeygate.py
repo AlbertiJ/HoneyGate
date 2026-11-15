@@ -14,6 +14,7 @@ import time
 import socket
 import hashlib
 import logging
+import secrets
 import smtplib
 import sqlite3
 import tempfile
@@ -1028,22 +1029,39 @@ def run_tests():
                     assert "FAKE_API_KEY_01=hg_decoy_token_0001" in r_http_ht
                     s_http_ht.close()
 
-                    # 12.7 Telnet y MySQL banners estáticos
+                    # 12.7 Perfil unificado Debian 12 en Telnet, HTTP Server y MySQL handshake binario v10
                     s_tel = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s_tel.settimeout(2.0)
                     s_tel.connect(("127.0.0.1", 32323))
                     b_tel = s_tel.recv(512).decode("utf-8", errors="ignore")
-                    assert "login:" in b_tel and "HoneyGate" not in b_tel
+                    assert "Debian GNU/Linux 12" in b_tel and "login:" in b_tel and "HoneyGate" not in b_tel, f"Banner Telnet: {b_tel}"
                     s_tel.close()
+
+                    assert "Apache/2.4.57 (Debian)" in r_http, f"Header Server HTTP no coincide con Debian 12: {r_http}"
 
                     s_my = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s_my.settimeout(2.0)
                     s_my.connect(("127.0.0.1", 33306))
-                    b_my = s_my.recv(512).decode("utf-8", errors="ignore")
-                    assert "5.7.42" in b_my
-                    s_my.sendall(b"SELECT * FROM users;\n")
-                    r_my = s_my.recv(512).decode("utf-8", errors="ignore")
-                    assert "ERROR 1045" in r_my
+                    b_my_raw = s_my.recv(512)
+                    assert len(b_my_raw) >= 30, f"Handshake binario MySQL demasiado corto: {len(b_my_raw)}"
+                    pkt_len = int.from_bytes(b_my_raw[:3], "little")
+                    seq_id = b_my_raw[3]
+                    my_payload = b_my_raw[4:4 + pkt_len]
+                    assert seq_id == 0 and len(my_payload) == pkt_len
+                    assert my_payload[0] == 0x0A, f"Debe ser MySQL Protocol v10 (0x0A), fue {my_payload[0]}"
+                    ver_end = my_payload.index(0x00, 1)
+                    my_ver = my_payload[1:ver_end].decode("ascii")
+                    assert "deb12" in my_ver, f"Versión MySQL no coincide con Debian 12: {my_ver}"
+                    assert b"mysql_native_password\x00" in my_payload
+
+                    # Enviar paquete binario MySQL (sin salto de línea) y validar ERR_Packet binario 1045
+                    probe_body = b"\x03SELECT 1"
+                    probe_pkt = len(probe_body).to_bytes(3, "little") + b"\x01" + probe_body
+                    s_my.sendall(probe_pkt)
+                    r_my_raw = s_my.recv(512)
+                    assert len(r_my_raw) >= 13 and r_my_raw[4] == 0xFF, f"Se esperaba MySQL ERR_Packet binario: {r_my_raw!r}"
+                    err_code = int.from_bytes(r_my_raw[5:7], "little")
+                    assert err_code == 1045 and b"#28000" in r_my_raw and b"Access denied" in r_my_raw
                     s_my.close()
 
                     # 12.8 Límite de comandos por sesión (max_commands_per_session=5)
@@ -1100,7 +1118,7 @@ def run_tests():
 
                 # Verificar escapeHtml en eventos del panel web dashboard
                 assert "events-table-body" in dash_html and "escapeHtml(ev.description" in dash_html
-                print("       -> Servicios emulados, 127.0.0.1, cero egreso/DNS, límites, honeytokens y CSP estricta: OK")
+                print("       -> Perfil Debian 12, MySQL handshake v10 binario, cero egreso/DNS, límites, honeytokens y CSP: OK")
             finally:
                 root_logger.removeHandler(mem_handler)
                 p_portal.stop()
@@ -1123,6 +1141,236 @@ def run_tests():
 
         finally:
             engine.stop()
+
+    print("[TEST] 13. Validando Fase 5: MITRE JSON externo, GET /api/report (JSON/CSV/MD), enmascaramiento y purgas de privacidad...")
+    from honeygate.mitre import validate_and_load_mitre_rules
+    from honeygate.portal import _hmac_sha256_hex
+
+    with tempfile.TemporaryDirectory() as tmp5:
+        # 13.1 Validación y extensibilidad de reglas MITRE desde JSON externo
+        custom_rules_path = os.path.join(tmp5, "custom_mitre.json")
+        with open(custom_rules_path, "w", encoding="utf-8") as mf:
+            json.dump({
+                "version": 1,
+                "techniques": {
+                    "T9999": {"name": "Custom Technique", "tactic": "Discovery"}
+                },
+                "event_type_rules": {"CUSTOM_EVT": "T9999"},
+                "command_rules": [
+                    {"id": "custom_probe", "services": ["ssh"], "pattern": "^customprobe\\b", "technique": "T9999"}
+                ],
+            }, mf)
+        custom_engine = validate_and_load_mitre_rules(custom_rules_path)
+        assert custom_engine.resolve_command("ssh", "customprobe --all", "CUSTOM_EVT") == "T9999"
+
+        bad_rules_path = os.path.join(tmp5, "bad_mitre.json")
+        with open(bad_rules_path, "w", encoding="utf-8") as bf:
+            json.dump({"version": 1, "techniques": {"INVALID_ID": {"name": "X", "tactic": "Y"}}, "event_type_rules": {}}, bf)
+        try:
+            validate_and_load_mitre_rules(bad_rules_path)
+            raise AssertionError("Debía fallar la validación de ID MITRE inválido")
+        except ValueError:
+            pass
+
+        # 13.2 Daemon con datos mixtos (inyección CSV, inyección Markdown/HTML, correo visitante y registros expirados)
+        r_db = os.path.join(tmp5, "report.db")
+        r_secret_path = os.path.join(tmp5, "portal_secret")
+        r_storage = HoneyGateStorage(db_path=r_db)
+        r_hw = HoneyGateHoneywall(storage=r_storage)
+        r_forensics = ForensicAlertManager(target_log_files=[os.path.join(tmp5, "f.log")], storage=r_storage)
+        r_token = secrets.token_urlsafe(24)
+        os.environ["HONEYGATE_API_TOKEN"] = r_token
+        r_server = AsyncDashboardServer(
+            honeywall=r_hw,
+            forensics=r_forensics,
+            host="127.0.0.1",
+            port=38891,
+            storage=r_storage,
+            portal_secret_path=r_secret_path,
+        )
+        r_server.start_background()
+        time.sleep(0.25)
+        r_hdr = {"X-Auth-Token": r_token}
+
+        try:
+            # Visitante con correo real, OTP challenge y registro portal
+            v_email = "juan.perez@empresa.com"
+            v_hash = _hmac_sha256_hex(r_server.portal_secret, v_email)
+            v_sess_id = r_storage.create_session(
+                ip="198.51.100.44",
+                mac="aa:bb:cc:dd:ee:01",
+                device_id="hg:visitor001",
+                service="portal-cautivo",
+                visitor_label=v_email,
+                mode=1,
+                status="active",
+                observed_reason="=CMD|' /C calc'!A0",
+            )
+            r_storage.record_portal_registration(
+                session_id=v_sess_id,
+                device_id="hg:visitor001",
+                browser_hash="bhash1",
+                mac="aa:bb:cc:dd:ee:01",
+                ip="198.51.100.44",
+                email_hash=v_hash,
+                email_domain="empresa.com",
+                consent_accepted=True,
+                otp_verified=True,
+                observed=False,
+                observed_reason="",
+                dhcp_lease_sec=300,
+                bandwidth_kbps=10240,
+            )
+            r_storage.create_otp_challenge(
+                challenge_id="chal-forget-1",
+                device_id="hg:visitor001",
+                ip="198.51.100.44",
+                email_hash=v_hash,
+                otp_salt="salt1",
+                otp_hash="hash1",
+            )
+            r_storage.record_event(
+                event_type="DECEPTION_COMMAND_CAPTURED",
+                severity="warning",
+                session_id=v_sess_id,
+                device_id="hg:visitor001",
+                ip="198.51.100.44",
+                mitre_technique="T1059",
+                description="Entrada capturada <script>alert(1)</script> [click](https://evil.invalid)",
+                metadata={
+                    "service": "ssh",
+                    "dest_port": 2222,
+                    "command": "+SUM(1,2) [phish](https://evil.invalid) <img src=x>",
+                },
+            )
+
+            # Sesión y evento expirados (> 30 días) para probar purga por retención
+            old_ts = time.time() - (45 * 86400)
+            old_sess_id = r_storage.create_session(
+                ip="198.51.100.99",
+                mac="aa:bb:cc:dd:ee:99",
+                device_id="hg:oldvisitor",
+                service="ssh",
+                visitor_label="viejo@empresa.com",
+                mode=2,
+                status="closed",
+            )
+            r_storage._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (old_ts, old_ts + 5, old_sess_id),
+            )
+            old_ev_id = r_storage.record_event(
+                event_type="DECEPTION_COMMAND_CAPTURED",
+                severity="normal",
+                session_id=old_sess_id,
+                device_id="hg:oldvisitor",
+                ip="198.51.100.99",
+                description="-2+2 @IMPORT('http://x.invalid')",
+                metadata={"command": "@IMPORT('x')"},
+            )
+            r_storage._conn.execute("UPDATE events SET timestamp = ? WHERE id = ?", (old_ts, old_ev_id))
+            r_storage.create_otp_challenge(
+                challenge_id="chal-old-1",
+                device_id="hg:oldvisitor",
+                ip="198.51.100.99",
+                email_hash="oldhash",
+                otp_salt="s",
+                otp_hash="h",
+            )
+            r_storage._conn.execute(
+                "UPDATE otp_challenges SET created_at = ?, expires_at = ? WHERE challenge_id = ?",
+                (old_ts, old_ts + 300, "chal-old-1"),
+            )
+            r_storage._conn.commit()
+
+            # 13.3 GET /api/report exige token (401)
+            c_noauth, _, _ = _http_request("http://127.0.0.1:38891/api/report?format=json")
+            assert c_noauth == 401
+
+            # 13.4 Enmascaramiento por defecto vs include_full_email=1 en JSON
+            c_rep_json, _, rep_json_body = _http_request("http://127.0.0.1:38891/api/report?format=json", headers=r_hdr)
+            assert c_rep_json == 200
+            rep_data = json.loads(rep_json_body)
+            assert rep_data["privacy"]["email_masking_applied"] is True
+            assert "juan.perez@empresa.com" not in rep_json_body
+            assert "j***@empresa.com" in rep_json_body
+
+            c_rep_full, _, rep_full_body = _http_request(
+                "http://127.0.0.1:38891/api/report?format=json&include_full_email=1",
+                headers=r_hdr,
+            )
+            assert c_rep_full == 200 and "juan.perez@empresa.com" in rep_full_body
+
+            # 13.5 CSV neutraliza = + - @
+            c_rep_csv, _, rep_csv_body = _http_request("http://127.0.0.1:38891/api/report?format=csv", headers=r_hdr)
+            assert c_rep_csv == 200
+            assert "'=CMD|' /C calc'!A0" in rep_csv_body
+            assert "'+SUM(1,2)" in rep_csv_body
+            assert "'@IMPORT('x')" in rep_csv_body or "'-2+2" in rep_csv_body
+            assert "juan.perez@empresa.com" not in rep_csv_body
+
+            # 13.6 Markdown escapa HTML y enlaces maliciosos
+            c_rep_md, _, rep_md_body = _http_request("http://127.0.0.1:38891/api/report?format=markdown", headers=r_hdr)
+            assert c_rep_md == 200
+            assert "<script>" not in rep_md_body and "&lt;script&gt;" in rep_md_body
+            assert "[phish](https://" not in rep_md_body
+            assert "juan.perez@empresa.com" not in rep_md_body and "j***@empresa.com" in rep_md_body
+
+            # 13.7 Purga por retención exige confirm=true
+            c_ret_noconf, _, _ = _http_request(
+                "http://127.0.0.1:38891/api/privacy/retention-purge",
+                method="POST",
+                headers=r_hdr,
+                body={"confirm": False},
+            )
+            assert c_ret_noconf == 400
+
+            c_ret_ok, _, ret_body = _http_request(
+                "http://127.0.0.1:38891/api/privacy/retention-purge",
+                method="POST",
+                headers=r_hdr,
+                body={"confirm": True},
+            )
+            assert c_ret_ok == 200
+            ret_res = json.loads(ret_body)["purged"]
+            assert ret_res["sessions_deleted"] >= 1 and ret_res["events_deleted"] >= 1 and ret_res["otp_challenges_deleted"] >= 1
+            assert r_storage.get_session(old_sess_id) is None
+
+            # 13.8 Forget-visitor exige confirm=true y borra sesión + eventos + OTP + registro dejando auditoría sin PII
+            c_fg_noconf, _, _ = _http_request(
+                "http://127.0.0.1:38891/api/privacy/forget-visitor",
+                method="POST",
+                headers=r_hdr,
+                body={"email": v_email},
+            )
+            assert c_fg_noconf == 400
+
+            c_fg_ok, _, fg_body = _http_request(
+                "http://127.0.0.1:38891/api/privacy/forget-visitor",
+                method="POST",
+                headers=r_hdr,
+                body={"confirm": True, "email": v_email},
+            )
+            assert c_fg_ok == 200
+            fg_res = json.loads(fg_body)["purged"]
+            assert fg_res["sessions_deleted"] == 1 and fg_res["events_deleted"] == 1 and fg_res["otp_challenges_deleted"] == 1
+            assert r_storage.get_session(v_sess_id) is None
+
+            # Verificar eventos de auditoría SIN datos personales
+            audit_evs, _ = r_storage.list_events(limit=20)
+            audit_types = {e["event_type"] for e in audit_evs}
+            assert "RETENTION_PURGE" in audit_types and "VISITOR_DATA_PURGED" in audit_types
+            for ev in audit_evs:
+                if ev["event_type"] in ("RETENTION_PURGE", "VISITOR_DATA_PURGED"):
+                    assert ev["ip"] is None and ev["device_id"] is None
+                    serialized = json.dumps(ev)
+                    for pii in (v_email, "198.51.100.44", "198.51.100.99", "hg:visitor001", "aa:bb:cc:dd:ee:01"):
+                        assert pii not in serialized, f"Evento de auditoría contiene PII '{pii}': {serialized}"
+        finally:
+            r_server.stop()
+            r_storage.close()
+            os.environ.pop("HONEYGATE_API_TOKEN", None)
+        print("       -> MITRE JSON externo, /api/report (JSON/CSV/MD), enmascaramiento y purgas de privacidad: OK")
 
     print("[TEST] 10. Verificando ausencia total del token fijo antiguo en el repositorio...")
     forbidden = "hg_sec_" + "token"

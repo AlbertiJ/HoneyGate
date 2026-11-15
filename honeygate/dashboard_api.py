@@ -22,6 +22,8 @@ from honeygate.honeywall_core import HoneyGateHoneywall
 from honeygate.forensic_monitor import ForensicAlertManager
 from honeygate.storage import HoneyGateStorage, VALID_SESSION_STATUSES, VALID_SEVERITIES
 from honeygate.deception import validate_honeytokens_config, validate_portal_template_config
+from honeygate.portal import DEFAULT_PORTAL_SECRET_PATH, _hmac_sha256_hex, load_or_create_portal_secret
+from honeygate.reporting import build_report_payload
 
 logger = logging.getLogger("HoneyGateAPI")
 
@@ -220,6 +222,17 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                     <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Sin hosts bloqueados.</td></tr>
                 </tbody>
             </table>
+
+            <h2 style="margin-top: 28px; color: var(--accent-green);">
+                <span>Informes y Privacidad (/api/report y Ley 25.326)</span>
+            </h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+                <button class="btn-action btn-unblock" id="btn-report-md">Ver Informe Markdown</button>
+                <button class="btn-action btn-unblock" id="btn-report-csv">Descargar CSV Seguro</button>
+                <button class="btn-action btn-unblock" id="btn-report-json">Descargar JSON</button>
+                <button class="btn-action" id="btn-purge-retention">Purgar Retención Expirada</button>
+            </div>
+            <pre id="report-preview" style="background: #0a0e14; border: 1px solid var(--border); padding: 12px; border-radius: 6px; font-size: 11px; max-height: 220px; overflow: auto; white-space: pre-wrap; color: #cbd5e1;">Presioná "Ver Informe Markdown" para consultar /api/report (correos enmascarados por defecto).</pre>
         </div>
 
         <div class="panel">
@@ -464,6 +477,47 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
             fetchMetrics();
         }
 
+        async function loadReport(fmt, download) {
+            const res = await fetch('/api/report?format=' + encodeURIComponent(fmt), {
+                headers: { 'X-Auth-Token': AUTH_TOKEN }
+            });
+            const txt = await res.text();
+            const preview = document.getElementById('report-preview');
+            if (preview) {
+                preview.textContent = txt;
+            }
+            if (download && res.ok) {
+                const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'honeygate_report.' + (fmt === 'markdown' ? 'md' : fmt);
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+        }
+
+        async function purgeRetentionConfirmed() {
+            if (!confirm('¿Confirmás eliminar sesiones, eventos y desafíos OTP anteriores a retention_days?')) return;
+            const res = await fetch('/api/privacy/retention-purge', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Auth-Token': AUTH_TOKEN
+                },
+                body: JSON.stringify({ confirm: true })
+            });
+            const data = await res.json();
+            const preview = document.getElementById('report-preview');
+            if (preview) preview.textContent = JSON.stringify(data, null, 2);
+            fetchMetrics();
+        }
+
+        document.getElementById('btn-report-md')?.addEventListener('click', () => loadReport('markdown', false));
+        document.getElementById('btn-report-csv')?.addEventListener('click', () => loadReport('csv', true));
+        document.getElementById('btn-report-json')?.addEventListener('click', () => loadReport('json', true));
+        document.getElementById('btn-purge-retention')?.addEventListener('click', purgeRetentionConfirmed);
+
         setInterval(fetchMetrics, 2000);
         fetchMetrics();
     </script>
@@ -482,6 +536,7 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
     forensics: ForensicAlertManager = None
     storage: Optional[HoneyGateStorage] = None
     auth_token: Optional[str] = None
+    portal_secret: Optional[bytes] = None
 
     def log_message(self, format, *args):
         # Suprimir logs HTTP verbosos en stdout para mantener la terminal limpia
@@ -869,6 +924,72 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
                     "offset": offset,
                 })
 
+            elif path == "/api/report":
+                if self.storage is None:
+                    self._send_json({"error": "Almacenamiento SQLite no inicializado"}, status_code=500)
+                    return
+
+                fmt = qs["format"][0].strip().lower() if "format" in qs else "json"
+                include_full_email = False
+                if "include_full_email" in qs:
+                    raw_inc = qs["include_full_email"][0].strip().lower()
+                    if raw_inc in ("1", "true", "yes"):
+                        include_full_email = True
+                    elif raw_inc in ("0", "false", "no"):
+                        include_full_email = False
+                    else:
+                        self._send_json({"error": "Parámetro 'include_full_email' inválido"}, status_code=400)
+                        return
+
+                mode_filter = None
+                if "mode" in qs:
+                    try:
+                        mode_filter = int(qs["mode"][0])
+                    except ValueError:
+                        self._send_json({"error": "Parámetro 'mode' inválido"}, status_code=400)
+                        return
+                    if mode_filter not in (1, 2, 3):
+                        self._send_json({"error": "Parámetro 'mode' debe ser 1, 2 o 3"}, status_code=400)
+                        return
+
+                since_filter = None
+                if "since" in qs:
+                    try:
+                        since_filter = float(qs["since"][0])
+                    except ValueError:
+                        self._send_json({"error": "Parámetro 'since' inválido"}, status_code=400)
+                        return
+                    if not math.isfinite(since_filter) or since_filter < 0:
+                        self._send_json({"error": "Parámetro 'since' inválido"}, status_code=400)
+                        return
+
+                until_filter = None
+                if "until" in qs:
+                    try:
+                        until_filter = float(qs["until"][0])
+                    except ValueError:
+                        self._send_json({"error": "Parámetro 'until' inválido"}, status_code=400)
+                        return
+                    if not math.isfinite(until_filter) or until_filter < 0:
+                        self._send_json({"error": "Parámetro 'until' inválido"}, status_code=400)
+                        return
+
+                try:
+                    ctype, body_bytes = build_report_payload(
+                        storage=self.storage,
+                        honeywall=self.honeywall,
+                        fmt=fmt,
+                        include_full_email=include_full_email,
+                        mode=mode_filter,
+                        since=since_filter,
+                        until=until_filter,
+                    )
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status_code=400)
+                    return
+
+                self._send_raw(ctype, body_bytes, status_code=200)
+
             else:
                 self._send_json({"error": "Endpoint no encontrado"}, status_code=404)
         else:
@@ -1013,8 +1134,120 @@ class HoneyGateHTTPRequestHandler(BaseHTTPRequestHandler):
             unblocked = self.honeywall.unblock_ip(validated_ip)
             self._send_json({"status": "success", "unblocked": unblocked, "ip": validated_ip})
 
+        elif path == "/api/privacy/retention-purge":
+            if self.storage is None:
+                self._send_json({"error": "Almacenamiento SQLite no inicializado"}, status_code=500)
+                return
+
+            ok, payload = self._read_json_body(allow_empty=False)
+            if not ok:
+                return
+
+            if payload.get("confirm") is not True:
+                self._send_json(
+                    {"error": "Confirmación explícita requerida: envíe confirm=true"},
+                    status_code=400,
+                )
+                return
+
+            ret_days = None
+            if "retention_days" in payload and payload["retention_days"] is not None:
+                v = payload["retention_days"]
+                if not self._is_strict_int(v) or not (1 <= v <= 3650):
+                    self._send_json({"error": "El campo 'retention_days' debe estar entre 1 y 3650"}, status_code=400)
+                    return
+                ret_days = v
+
+            counts = self.storage.purge_expired_retention(retention_days=ret_days)
+            self._send_json({"status": "success", "purged": counts})
+
+        elif path == "/api/privacy/forget-visitor":
+            if self.storage is None:
+                self._send_json({"error": "Almacenamiento SQLite no inicializado"}, status_code=500)
+                return
+
+            ok, payload = self._read_json_body(allow_empty=False)
+            if not ok:
+                return
+
+            if payload.get("confirm") is not True:
+                self._send_json(
+                    {"error": "Confirmación explícita requerida: envíe confirm=true"},
+                    status_code=400,
+                )
+                return
+
+            raw_email = payload.get("email")
+            raw_device_id = payload.get("device_id")
+            raw_ip = payload.get("ip")
+
+            clean_email = None
+            clean_email_hash = None
+            if raw_email is not None:
+                if not isinstance(raw_email, str):
+                    self._send_json({"error": "El campo 'email' debe ser texto"}, status_code=400)
+                    return
+                if raw_email.strip():
+                    clean_email = raw_email.strip().lower()
+                    if len(clean_email) > 254:
+                        self._send_json({"error": "El campo 'email' supera 254 caracteres"}, status_code=400)
+                        return
+                    secret_key = self.portal_secret or load_or_create_portal_secret()
+                    clean_email_hash = _hmac_sha256_hex(secret_key, clean_email)
+
+            clean_device_id = None
+            if raw_device_id is not None:
+                if not isinstance(raw_device_id, str):
+                    self._send_json({"error": "El campo 'device_id' debe ser texto"}, status_code=400)
+                    return
+                if raw_device_id.strip():
+                    clean_device_id = raw_device_id.strip()
+                    if len(clean_device_id) > 128:
+                        self._send_json({"error": "El campo 'device_id' supera 128 caracteres"}, status_code=400)
+                        return
+
+            clean_ip = None
+            if raw_ip is not None:
+                if not isinstance(raw_ip, str):
+                    self._send_json({"error": "El campo 'ip' debe ser texto"}, status_code=400)
+                    return
+                if raw_ip.strip():
+                    try:
+                        clean_ip = str(ipaddress.ip_address(raw_ip.strip()))
+                    except ValueError:
+                        self._send_json({"error": "Dirección IP inválida"}, status_code=400)
+                        return
+
+            if not any((clean_email, clean_device_id, clean_ip)):
+                self._send_json(
+                    {"error": "Debe indicar al menos uno de: email, device_id o ip"},
+                    status_code=400,
+                )
+                return
+
+            counts = self.storage.purge_visitor_data(
+                email=clean_email,
+                email_hash=clean_email_hash,
+                device_id=clean_device_id,
+                ip=clean_ip,
+            )
+            self._send_json({"status": "success", "purged": counts})
+
         else:
             self._send_json({"error": "Endpoint no encontrado"}, status_code=404)
+
+    def _send_raw(self, content_type: str, body: bytes, status_code: int = 200):
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _send_json(self, data: Any, status_code: int = 200):
         body = json.dumps(data, indent=2).encode("utf-8")
@@ -1039,6 +1272,8 @@ class AsyncDashboardServer:
         host: str = "127.0.0.1",
         port: int = 8888,
         storage: Optional[HoneyGateStorage] = None,
+        portal_secret: Optional[bytes] = None,
+        portal_secret_path: str = DEFAULT_PORTAL_SECRET_PATH,
     ):
         self.host = host
         self.port = port
@@ -1053,6 +1288,11 @@ class AsyncDashboardServer:
         else:
             self.storage = HoneyGateStorage()
             self._owns_storage = True
+        self.portal_secret = (
+            portal_secret
+            if portal_secret is not None
+            else load_or_create_portal_secret(portal_secret_path)
+        )
         self.httpd: Optional[HTTPServer] = None
         self.server_thread: Optional[threading.Thread] = None
         env_token = os.environ.get("HONEYGATE_API_TOKEN", "").strip()
@@ -1078,12 +1318,14 @@ class AsyncDashboardServer:
         bound_forensics = self.forensics
         bound_storage = self.storage
         bound_token = self.api_token
+        bound_portal_secret = self.portal_secret
 
         class BoundHandler(HoneyGateHTTPRequestHandler):
             honeywall = bound_honeywall
             forensics = bound_forensics
             storage = bound_storage
             auth_token = bound_token
+            portal_secret = bound_portal_secret
 
         HTTPServer.allow_reuse_address = True
         self.httpd = HTTPServer((self.host, self.port), BoundHandler)

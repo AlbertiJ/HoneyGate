@@ -677,4 +677,156 @@ class HoneyGateDaemonClient {
       connection?.disconnect()
     }
   }
+
+  /**
+   * Descarga el informe generado por el daemon (GET /api/report?format=...&include_full_email=...).
+   */
+  suspend fun getReport(
+    baseUrl: String,
+    token: String,
+    format: String = "markdown",
+    includeFullEmail: Boolean = false
+  ): Result<String> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
+    val cleanUrl = baseUrl.trimEnd('/')
+    val safeFmt = when (format.lowercase()) {
+      "csv", "json", "markdown" -> format.lowercase()
+      "md" -> "markdown"
+      else -> "markdown"
+    }
+    var connection: HttpURLConnection? = null
+    try {
+      val url = URL("$cleanUrl/api/report?format=$safeFmt&include_full_email=${if (includeFullEmail) "1" else "0"}")
+      connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 4000
+        readTimeout = 5000
+        setRequestProperty("X-Auth-Token", token)
+      }
+      val code = connection.responseCode
+      if (code == 200) {
+        Result.success(readResponseBody(connection, isError = false))
+      } else {
+        Result.failure(Exception(parseErrorDetail(code, readResponseBody(connection, isError = true), "obtener /api/report")))
+      }
+    } catch (e: Exception) {
+      Result.failure(Exception("Sin conexión: ${e.localizedMessage ?: "error de red"}"))
+    } finally {
+      connection?.disconnect()
+    }
+  }
+
+  /**
+   * Ejecuta purga por retención en el daemon (POST /api/privacy/retention-purge) con confirm=true.
+   */
+  suspend fun purgeRetention(
+    baseUrl: String,
+    token: String,
+    retentionDays: Int? = null
+  ): Result<PrivacyPurgeResult> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
+    val cleanUrl = baseUrl.trimEnd('/')
+    var connection: HttpURLConnection? = null
+    try {
+      val url = URL("$cleanUrl/api/privacy/retention-purge")
+      connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 4000
+        readTimeout = 5000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("X-Auth-Token", token)
+      }
+      val payload = JSONObject().apply {
+        put("confirm", true)
+        retentionDays?.let { put("retention_days", it) }
+      }
+      OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {
+        it.write(payload.toString())
+        it.flush()
+      }
+      val code = connection.responseCode
+      if (code == 200) {
+        Result.success(parsePurgeResult(readResponseBody(connection, isError = false)))
+      } else {
+        Result.failure(Exception(parseErrorDetail(code, readResponseBody(connection, isError = true), "purgar por retención")))
+      }
+    } catch (e: Exception) {
+      Result.failure(Exception("Sin conexión: ${e.localizedMessage ?: "error de red"}"))
+    } finally {
+      connection?.disconnect()
+    }
+  }
+
+  /**
+   * Solicita borrado completo de datos de un visitante (POST /api/privacy/forget-visitor) con confirm=true.
+   */
+  suspend fun forgetVisitor(
+    baseUrl: String,
+    token: String,
+    email: String? = null,
+    deviceId: String? = null,
+    ip: String? = null
+  ): Result<PrivacyPurgeResult> = withContext(Dispatchers.IO) {
+    if (token.isBlank()) {
+      return@withContext Result.failure(Exception("Configurá el token"))
+    }
+    val cleanUrl = baseUrl.trimEnd('/')
+    var connection: HttpURLConnection? = null
+    try {
+      val url = URL("$cleanUrl/api/privacy/forget-visitor")
+      connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 4000
+        readTimeout = 5000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("X-Auth-Token", token)
+      }
+      val payload = JSONObject().apply {
+        put("confirm", true)
+        email?.trim()?.takeIf { it.isNotEmpty() }?.let { put("email", it) }
+        deviceId?.trim()?.takeIf { it.isNotEmpty() }?.let { put("device_id", it) }
+        ip?.trim()?.takeIf { it.isNotEmpty() }?.let { put("ip", it) }
+      }
+      OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {
+        it.write(payload.toString())
+        it.flush()
+      }
+      val code = connection.responseCode
+      if (code == 200) {
+        Result.success(parsePurgeResult(readResponseBody(connection, isError = false)))
+      } else {
+        Result.failure(Exception(parseErrorDetail(code, readResponseBody(connection, isError = true), "borrar datos del visitante")))
+      }
+    } catch (e: Exception) {
+      Result.failure(Exception("Sin conexión: ${e.localizedMessage ?: "error de red"}"))
+    } finally {
+      connection?.disconnect()
+    }
+  }
+
+  private fun parsePurgeResult(jsonText: String): PrivacyPurgeResult {
+    val root = JSONObject(jsonText)
+    val purged = root.optJSONObject("purged") ?: JSONObject()
+    return PrivacyPurgeResult(
+      sessionsDeleted = purged.optInt("sessions_deleted", 0),
+      eventsDeleted = purged.optInt("events_deleted", 0),
+      otpChallengesDeleted = purged.optInt("otp_challenges_deleted", 0),
+      portalRegistrationsDeleted = purged.optInt("portal_registrations_deleted", 0)
+    )
+  }
 }
+
+data class PrivacyPurgeResult(
+  val sessionsDeleted: Int,
+  val eventsDeleted: Int,
+  val otpChallengesDeleted: Int,
+  val portalRegistrationsDeleted: Int
+)

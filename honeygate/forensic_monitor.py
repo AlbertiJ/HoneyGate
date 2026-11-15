@@ -18,6 +18,8 @@ import threading
 import subprocess
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
+from honeygate.mitre import get_mitre_engine
+
 logger = logging.getLogger("HoneyGateForensics")
 
 # Constantes del Kernel de Linux para inotify (definidas en <sys/inotify.h>)
@@ -355,7 +357,7 @@ class ForensicAlertManager:
 
         if self.storage is not None:
             src_ip = str(data.get("ip") or data.get("src_ip") or "")
-            mitre = "T1110" if "FAILED" in event_type else ("T1078" if "ACCEPTED" in event_type or "SUCCESS" in event_type else "")
+            mitre = get_mitre_engine().resolve_event(event_type)
             self.storage.record_event(
                 event_type=event_type,
                 severity=severity,

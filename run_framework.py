@@ -18,6 +18,7 @@ from honeygate.forensic_monitor import ForensicAlertManager, DesktopNotification
 from honeygate.dashboard_api import AsyncDashboardServer
 from honeygate.portal import AsyncPortalServer
 from honeygate.storage import HoneyGateStorage
+from honeygate.mitre import get_mitre_engine
 
 logger = logging.getLogger("HoneyGateMain")
 
@@ -29,6 +30,13 @@ def main():
     os.makedirs("data", exist_ok=True)
 
     print("\033[1;36m[+] Iniciando Framework Defensivo HoneyGate (Non-Root User Space)...\033[0m")
+
+    # Validar reglas MITRE ATT&CK externas al arrancar
+    mitre_engine = get_mitre_engine()
+    logger.info(
+        f"[MITRE-RULES] Cargadas {len(mitre_engine.techniques)} técnicas y "
+        f"{len(mitre_engine.command_rules)} reglas de comando."
+    )
 
     # 0. Capa de persistencia única en SQLite
     storage = HoneyGateStorage(db_path="data/honeygate.db")

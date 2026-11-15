@@ -78,9 +78,20 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
   val daemonStatus by viewModel.daemonStatus.collectAsStateWithLifecycle()
   val isSyncingDaemon by viewModel.isSyncingDaemon.collectAsStateWithLifecycle()
   val daemonSyncMessage by viewModel.daemonSyncMessage.collectAsStateWithLifecycle()
+  val daemonReportText by viewModel.daemonReportText.collectAsStateWithLifecycle()
+  val reportFormat by viewModel.reportFormat.collectAsStateWithLifecycle()
+  val reportIncludeFullEmail by viewModel.reportIncludeFullEmail.collectAsStateWithLifecycle()
+  val isLoadingReport by viewModel.isLoadingReport.collectAsStateWithLifecycle()
+  val reportError by viewModel.reportError.collectAsStateWithLifecycle()
   var showDaemonDialog by remember { mutableStateOf(false) }
 
   val isOnline = daemonStatus?.online == true
+
+  LaunchedEffect(selectedTab, isOnline) {
+    if (selectedTab == 3 && isOnline && daemonReportText.isEmpty()) {
+      viewModel.loadDaemonReport()
+    }
+  }
 
   Scaffold(
     modifier = Modifier.fillMaxSize(),
@@ -281,7 +292,9 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
             onRunDemoRedTeamCommand = { user, cmd -> viewModel.runDemoRedTeamCommand(user, cmd) },
             onClearMode1Result = { viewModel.clearMode1Result() },
             onUpdateBranding = { name, primary, accent -> viewModel.updateCompanyBranding(name, primary, accent) },
-            onOpenDaemonSettings = { showDaemonDialog = true }
+            onOpenDaemonSettings = { showDaemonDialog = true },
+            onPurgeRetentionConfirmed = { viewModel.purgeRetentionConfirmed() },
+            onForgetVisitorConfirmed = { email, devId, ip -> viewModel.purgeVisitorDataConfirmed(email, devId, ip) }
           )
           2 -> AdminSessionsScreen(
             sessions = sessions,
@@ -289,10 +302,19 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
             onIsolateConfirmed = { session -> viewModel.isolateOrUnblockSessionConfirmed(session, blocked = true) },
             onUnblockConfirmed = { session -> viewModel.isolateOrUnblockSessionConfirmed(session, blocked = false) },
             onObserveConfirmed = { session, reason -> viewModel.observeSessionConfirmed(session, reason) },
+            onForgetVisitorConfirmed = { email, devId, ip -> viewModel.purgeVisitorDataConfirmed(email, devId, ip) },
             onRefreshFromDaemon = { viewModel.syncDaemonData() }
           )
           3 -> BlueTeamReportScreen(
-            reportText = viewModel.generateAuditReport()
+            reportText = daemonReportText,
+            selectedFormat = reportFormat,
+            includeFullEmail = reportIncludeFullEmail,
+            isLoading = isLoadingReport,
+            errorMessage = reportError,
+            isOnline = isOnline,
+            onSelectFormat = { fmt -> viewModel.loadDaemonReport(format = fmt) },
+            onToggleIncludeFullEmail = { inc -> viewModel.loadDaemonReport(includeFullEmail = inc) },
+            onRefreshReport = { viewModel.loadDaemonReport() }
           )
         }
       }

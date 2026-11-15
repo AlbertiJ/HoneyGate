@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.HoneyGateDatabase
 import com.example.data.remote.HoneyGateDaemonClient
 import com.example.data.repository.HoneyGateRepository
+import com.example.ui.viewmodel.HoneyGateViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -256,5 +257,24 @@ class ExampleRobolectricTest {
     assertEquals("cat .env<script>alert(1)</script>", entity.capturedCommand)
     assertFalse(entity.description.contains("\u0007"))
     assertFalse(entity.capturedCommand!!.contains("\u0007"))
+  }
+
+  @Test
+  fun `fase5 removes local report generator and sanitizes daemon report multiline text`() = runBlocking {
+    val hasLocalGenerator = HoneyGateViewModel::class.java.declaredMethods.any {
+      it.name == "generateAuditReport"
+    }
+    assertFalse(hasLocalGenerator)
+
+    repository.preseedInitialDataIfEmpty()
+    val res = repository.fetchDaemonReport(format = "markdown", includeFullEmail = false)
+    assertTrue(res.isFailure)
+
+    val cleaned = HoneyGateRepository.sanitizeMultilinePlainText(
+      "# Informe\n\u001b[31mALERTA\u001b[0m\u0007\nVisitante: j***@empresa.com"
+    )
+    assertEquals("# Informe\nALERTA\nVisitante: j***@empresa.com", cleaned)
+    assertFalse(cleaned.contains("\u0007"))
+    assertFalse(cleaned.contains("\u001b"))
   }
 }

@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from honeygate.honeywall_core import HoneyGateHoneywall
+from honeygate.mitre import get_mitre_engine
 from honeygate.storage import DEFAULT_PORTAL_TEMPLATE, HoneyGateStorage
 
 logger = logging.getLogger("HoneyGatePortal")
@@ -590,7 +591,7 @@ class PortalService:
                 mode=int(cfg.get("mode", 1)),
                 device_id=fp["device_id"],
                 ip=client_ip,
-                mitre_technique="T1078",
+                mitre_technique=get_mitre_engine().resolve_event("ANTISYBIL_DISPOSABLE_DOMAIN"),
                 description=f"Registro rechazado por dominio temporal en portal ({email_domain})",
                 metadata={
                     "domain": email_domain,
@@ -712,7 +713,7 @@ class PortalService:
                 mode=mode,
                 device_id=fp["device_id"],
                 ip=client_ip,
-                mitre_technique="T1078",
+                mitre_technique=get_mitre_engine().resolve_event("ANTISYBIL_OBSERVATION"),
                 description=(
                     f"Sesión #{session_id} marcada en observación (lease={lease_sec}s, bw={bw_kbps}kbps): "
                     f"{obs_reason}"

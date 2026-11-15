@@ -15,9 +15,6 @@ import com.example.data.repository.Mode2ActionResult
 import com.example.data.repository.OtpChallenge
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class HoneyGateViewModel(application: Application) : AndroidViewModel(application) {
   private val database = HoneyGateDatabase.getInstance(application)
@@ -87,6 +84,22 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
 
   private val _eventsTotal = MutableStateFlow(0)
   val eventsTotal: StateFlow<Int> = _eventsTotal.asStateFlow()
+
+  // Estado del informe emitido exclusivamente por el daemon (GET /api/report)
+  private val _daemonReportText = MutableStateFlow("")
+  val daemonReportText: StateFlow<String> = _daemonReportText.asStateFlow()
+
+  private val _reportFormat = MutableStateFlow("markdown")
+  val reportFormat: StateFlow<String> = _reportFormat.asStateFlow()
+
+  private val _reportIncludeFullEmail = MutableStateFlow(false)
+  val reportIncludeFullEmail: StateFlow<Boolean> = _reportIncludeFullEmail.asStateFlow()
+
+  private val _isLoadingReport = MutableStateFlow(false)
+  val isLoadingReport: StateFlow<Boolean> = _isLoadingReport.asStateFlow()
+
+  private val _reportError = MutableStateFlow<String?>(null)
+  val reportError: StateFlow<String?> = _reportError.asStateFlow()
 
   // Estado DEMO opcional (apagado por defecto)
   private val _mode1Result = MutableStateFlow<Mode1AuthResult?>(null)
@@ -385,79 +398,70 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
     }
   }
 
-  fun generateAuditReport(): String {
-    val events = rawEvents.value
-    val sessions = sessionsList.value
-    val config = honeygateConfig.value
-    val status = _daemonStatus.value
-    val isOnline = status?.online == true
-    val date = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-
-    if (!isOnline && events.isEmpty() && sessions.isEmpty()) {
-      return buildString {
-        appendLine("HONEYGATE // INFORME DE TELEMETRÍA")
-        appendLine("Estado: Sin conexión con el daemon (${status?.errorMessage ?: "desconectado"})")
-        appendLine("Caché local: vacía (sin sesiones ni eventos registrados).")
-        appendLine("Conectá el daemon en el panel superior y sincronizá para obtener datos reales.")
-      }
-    }
-
-    val cacheLabel = if (isOnline) {
-      "Conectado al daemon (${config.daemonBaseUrl})"
-    } else {
-      val syncedStr = if (config.lastSyncedAtMs > 0L) {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(config.lastSyncedAtMs))
-      } else {
-        "sin sincronización previa"
-      }
-      "SIN CONEXIÓN — mostrando caché local ($syncedStr)"
-    }
-
-    val criticalCount = events.count { it.severity.equals("critical", true) || it.eventType == "Blocked" }
-    val warningCount = events.count { it.severity.equals("warning", true) || it.eventType == "Alerted" }
-    val normalCountLocal = events.size - criticalCount - warningCount
-
-    return buildString {
-      appendLine("================================================================================")
-      appendLine(" HONEYGATE // RESUMEN DE TELEMETRÍA")
-      if (config.demoModeEnabled) {
-        appendLine(" [AVISO: MODO DEMO ACTIVO — INCLUYE DATOS LOCALES DE PRUEBA]")
-      }
-      appendLine("================================================================================")
-      appendLine("Fecha de Vista   : $date")
-      appendLine("Origen de Datos  : $cacheLabel")
-      appendLine("Modo Operativo   : Modo ${config.gateMode} (portal_enabled=${config.portalEnabled}, honeypot_enabled=${config.honeypotEnabled})")
-      appendLine("Retención        : ${config.retentionDays} días | Rate límite salida: ${config.maxOutboundPerMinute} req/min")
-      appendLine("Resumen Eventos  : ${events.size} totales ($criticalCount críticos/bloqueados, $warningCount alertas, $normalCountLocal normales)")
-      appendLine("Sesiones en Vista: ${sessions.size}")
-      appendLine("--------------------------------------------------------------------------------\n")
-
-      if (sessions.isNotEmpty()) {
-        appendLine("SESIONES REGISTRADAS:")
-        sessions.forEach { s ->
-          appendLine(" • Session #${s.daemonSessionId ?: s.id} [${s.currentStatus}] IP=${s.ipAddress} MAC=${s.macAddress} device_id=${s.deviceId}")
-          appendLine("   Destino=${s.service}:${s.destPort} | Duración=${s.durationSeconds}s | In=${s.bytesIn}B Out=${s.bytesOut}B")
-          if (s.observedReason.isNotBlank()) {
-            appendLine("   Motivo observación: ${s.observedReason}")
-          }
+  fun loadDaemonReport(
+    format: String = _reportFormat.value,
+    includeFullEmail: Boolean = _reportIncludeFullEmail.value
+  ) {
+    _reportFormat.value = format
+    _reportIncludeFullEmail.value = includeFullEmail
+    viewModelScope.launch {
+      _isLoadingReport.value = true
+      _reportError.value = null
+      val res = repository.fetchDaemonReport(format = format, includeFullEmail = includeFullEmail)
+      _isLoadingReport.value = false
+      res.fold(
+        onSuccess = { txt ->
+          _daemonReportText.value = txt
+          _reportError.value = null
+        },
+        onFailure = { err ->
+          _reportError.value = err.localizedMessage ?: "No se pudo obtener el informe del daemon"
         }
-        appendLine()
-      }
+      )
+    }
+  }
 
-      if (events.isNotEmpty()) {
-        appendLine("EVENTOS RECIENTES:")
-        events.take(20).forEach { e ->
-          val timeStr = e.dateFormatted.ifBlank { SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(e.timestamp)) }
-          appendLine(" [$timeStr] [${e.severity.uppercase()}] ${e.rawEventType.ifBlank { e.category }}: ${e.description}")
-          if (!e.capturedCommand.isNullOrBlank()) {
-            appendLine("   Entrada capturada (texto plano): ${e.capturedCommand}")
+  fun purgeRetentionConfirmed() {
+    viewModelScope.launch {
+      val res = repository.purgeDaemonRetention()
+      res.fold(
+        onSuccess = { purged ->
+          _daemonSyncMessage.value =
+            "Purga por retención: ${purged.sessionsDeleted} sesiones, ${purged.eventsDeleted} eventos y ${purged.otpChallengesDeleted} desafíos OTP eliminados."
+          val cfg = repository.getConfigOnce()
+          if (cfg != null && cfg.daemonAuthToken.isNotBlank()) {
+            repository.syncWithDaemon(cfg.daemonBaseUrl, cfg.daemonAuthToken)
           }
-          if (e.mitreTechnique.isNotBlank()) {
-            appendLine("   MITRE: ${e.mitreTechnique}")
+          if (_daemonReportText.value.isNotEmpty()) {
+            loadDaemonReport()
           }
+        },
+        onFailure = { err ->
+          _daemonSyncMessage.value = "Error en purga por retención: ${err.localizedMessage}"
         }
-      }
-      appendLine("================================================================================")
+      )
+    }
+  }
+
+  fun purgeVisitorDataConfirmed(email: String?, deviceId: String?, ip: String?) {
+    viewModelScope.launch {
+      val res = repository.purgeDaemonVisitor(email = email, deviceId = deviceId, ip = ip)
+      res.fold(
+        onSuccess = { purged ->
+          _daemonSyncMessage.value =
+            "Datos de visitante eliminados: ${purged.sessionsDeleted} sesiones, ${purged.eventsDeleted} eventos y ${purged.otpChallengesDeleted} desafíos OTP."
+          val cfg = repository.getConfigOnce()
+          if (cfg != null && cfg.daemonAuthToken.isNotBlank()) {
+            repository.syncWithDaemon(cfg.daemonBaseUrl, cfg.daemonAuthToken)
+          }
+          if (_daemonReportText.value.isNotEmpty()) {
+            loadDaemonReport()
+          }
+        },
+        onFailure = { err ->
+          _daemonSyncMessage.value = "Error al borrar datos del visitante: ${err.localizedMessage}"
+        }
+      )
     }
   }
 }

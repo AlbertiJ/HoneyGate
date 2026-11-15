@@ -22,8 +22,10 @@ from honeygate.deception import (
     MAX_COMMANDS_PER_SESSION,
     MAX_LINE_BYTES,
     MAX_SESSION_DURATION_SEC,
+    build_mysql_err_packet,
     sanitize_captured_text,
 )
+from honeygate.mitre import get_mitre_engine
 
 # Configuración de Logging Forense
 # INVARIANTE 7: asegurar logs/ antes de configurar los handlers (evita fallar al importar)
@@ -314,11 +316,16 @@ class HoneyGateHoneywall:
             self.stats["isolated_count"] = len(self.isolated_ips)
             if self.storage is not None:
                 self.storage.set_isolated_ip(ip_address, reason)
+                mitre_id = (
+                    get_mitre_engine().resolve_event("IP_ISOLATED_RATE_LIMIT")
+                    if "tasa" in reason.lower()
+                    else get_mitre_engine().resolve_event("IP_ISOLATED_MANUAL")
+                )
                 self.storage.record_event(
                     event_type="IP_ISOLATED",
                     severity="critical",
                     ip=ip_address,
-                    mitre_technique="T1046" if "tasa" in reason.lower() else "",
+                    mitre_technique=mitre_id,
                     description=f"IP {ip_address} aislada: {reason}",
                     metadata={"reason": reason},
                 )
@@ -512,7 +519,7 @@ class EpollNetworkEngine:
                     session_id=s.storage_id,
                     device_id=f"net:{s.client_ip}:{s.mac}",
                     ip=s.client_ip,
-                    mitre_technique="T1059",
+                    mitre_technique=get_mitre_engine().resolve_event("DECEPTION_SESSION_TIMEOUT"),
                     description=(
                         f"Sesión emulada #{s.storage_id or s.fd} cerrada por límite de duración "
                         f"({self.max_session_duration_sec}s) en {s.service}:{s.dest_port}"
@@ -649,7 +656,7 @@ class EpollNetworkEngine:
                     session_id=session.storage_id,
                     device_id=f"net:{session.client_ip}:{session.mac}",
                     ip=session.client_ip,
-                    mitre_technique="T1059",
+                    mitre_technique=get_mitre_engine().resolve_event("DECEPTION_SESSION_TIMEOUT"),
                     description=f"Sesión #{session.storage_id or session.fd} cerrada por timeout ({self.max_session_duration_sec}s)",
                     metadata={"service": session.service, "dest_port": session.dest_port},
                 )
@@ -666,7 +673,7 @@ class EpollNetworkEngine:
                     session_id=session.storage_id,
                     device_id=f"net:{session.client_ip}:{session.mac}",
                     ip=session.client_ip,
-                    mitre_technique="T1059",
+                    mitre_technique=get_mitre_engine().resolve_event("DECEPTION_COMMAND_LIMIT_EXCEEDED"),
                     description=(
                         f"Límite de {self.max_commands_per_session} comandos alcanzado en "
                         f"{session.service}:{session.dest_port}"
@@ -762,7 +769,7 @@ class EpollNetworkEngine:
                             session_id=session.storage_id,
                             device_id=f"net:{session.client_ip}:{session.mac}",
                             ip=session.client_ip,
-                            mitre_technique="T1190",
+                            mitre_technique=get_mitre_engine().resolve_event("DECEPTION_LINE_LIMIT_EXCEEDED_HTTP"),
                             description=f"Línea HTTP excede {self.max_line_bytes} bytes: {clipped}",
                             metadata={
                                 "service": session.service,
@@ -801,7 +808,21 @@ class EpollNetworkEngine:
                 return False
             return True
 
-        # Servicios orientados a líneas (SSH, Telnet, MySQL, etc.)
+        # Servicio MySQL emulado: soporta tramas binarias del protocolo (header 4B) y sondas de texto
+        if session.service == "mysql":
+            while len(session.inbound_buffer) >= 4:
+                pkt_len = int.from_bytes(session.inbound_buffer[:3], "little")
+                if pkt_len <= 0 or pkt_len > self.max_line_bytes:
+                    break
+                total_len = 4 + pkt_len
+                if len(session.inbound_buffer) < total_len:
+                    return True
+                pkt_payload = bytes(session.inbound_buffer[4:total_len])
+                del session.inbound_buffer[:total_len]
+                if not self._dispatch_deception_line(session, pkt_payload):
+                    return False
+
+        # Servicios orientados a líneas (SSH, Telnet, sondas texto en MySQL, etc.)
         while b"\n" in session.inbound_buffer:
             nl_idx = session.inbound_buffer.find(b"\n")
             raw_line = bytes(session.inbound_buffer[:nl_idx]).rstrip(b"\r")
@@ -816,7 +837,7 @@ class EpollNetworkEngine:
                         session_id=session.storage_id,
                         device_id=f"net:{session.client_ip}:{session.mac}",
                         ip=session.client_ip,
-                        mitre_technique="T1059",
+                        mitre_technique=get_mitre_engine().resolve_event("DECEPTION_LINE_LIMIT_EXCEEDED_SHELL"),
                         description=f"Línea recibida excede {self.max_line_bytes} bytes: {clipped}",
                         metadata={
                             "service": session.service,
@@ -824,7 +845,12 @@ class EpollNetworkEngine:
                             "command": clipped,
                         },
                     )
-                if not self._send_deception_bytes(session, b"Line length limit exceeded.\r\n"):
+                limit_payload = (
+                    build_mysql_err_packet(1153, "08S01", "Got a packet bigger than max_allowed_packet", sequence_id=2)
+                    if session.service == "mysql"
+                    else b"Line length limit exceeded.\r\n"
+                )
+                if not self._send_deception_bytes(session, limit_payload):
                     return False
                 continue
 
@@ -841,7 +867,7 @@ class EpollNetworkEngine:
                     session_id=session.storage_id,
                     device_id=f"net:{session.client_ip}:{session.mac}",
                     ip=session.client_ip,
-                    mitre_technique="T1059",
+                    mitre_technique=get_mitre_engine().resolve_event("DECEPTION_LINE_LIMIT_EXCEEDED_SHELL"),
                     description=f"Entrada sin salto de línea excede {self.max_line_bytes} bytes: {clipped}",
                     metadata={
                         "service": session.service,
@@ -849,7 +875,12 @@ class EpollNetworkEngine:
                         "command": clipped,
                     },
                 )
-            return self._send_deception_bytes(session, b"Line length limit exceeded.\r\n")
+            limit_payload = (
+                build_mysql_err_packet(1153, "08S01", "Got a packet bigger than max_allowed_packet", sequence_id=2)
+                if session.service == "mysql"
+                else b"Line length limit exceeded.\r\n"
+            )
+            return self._send_deception_bytes(session, limit_payload)
 
         return True
 

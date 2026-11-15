@@ -13,6 +13,7 @@ import com.example.data.remote.DaemonSessionDto
 import com.example.data.remote.DaemonStatus
 import com.example.data.remote.HoneyGateDaemonClient
 import com.example.data.remote.HoneytokenDto
+import com.example.data.remote.PrivacyPurgeResult
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -280,6 +281,44 @@ class HoneyGateRepository(
     )
   }
 
+  suspend fun fetchDaemonReport(
+    format: String = "markdown",
+    includeFullEmail: Boolean = false
+  ): Result<String> {
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val baseUrl = cfg.daemonBaseUrl.trim().ifBlank { "http://10.0.2.2:8888" }
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token del daemon para descargar el informe (/api/report)"))
+    }
+    return daemonClient.getReport(baseUrl, token, format = format, includeFullEmail = includeFullEmail)
+      .map { sanitizeMultilinePlainText(it) }
+  }
+
+  suspend fun purgeDaemonRetention(retentionDays: Int? = null): Result<PrivacyPurgeResult> {
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val baseUrl = cfg.daemonBaseUrl.trim().ifBlank { "http://10.0.2.2:8888" }
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token del daemon"))
+    }
+    return daemonClient.purgeRetention(baseUrl, token, retentionDays = retentionDays)
+  }
+
+  suspend fun purgeDaemonVisitor(
+    email: String? = null,
+    deviceId: String? = null,
+    ip: String? = null
+  ): Result<PrivacyPurgeResult> {
+    val cfg = configDao.getConfigOnce() ?: HoneygateConfigEntity(id = 1)
+    val baseUrl = cfg.daemonBaseUrl.trim().ifBlank { "http://10.0.2.2:8888" }
+    val token = cfg.daemonAuthToken.trim()
+    if (token.isEmpty()) {
+      return Result.failure(Exception("Configurá el token del daemon"))
+    }
+    return daemonClient.forgetVisitor(baseUrl, token, email = email, deviceId = deviceId, ip = ip)
+  }
+
   // ---------------------------------------------------------------------------
   // Flujos locales estrictamente acotados al Modo DEMO (apagado por defecto)
   // ---------------------------------------------------------------------------
@@ -405,6 +444,30 @@ class HoneyGateRepository(
         if (sb.length >= maxLen) break
       }
       return sb.toString().trim()
+    }
+
+    fun sanitizeMultilinePlainText(raw: String?, maxLen: Int = 65536): String {
+      if (raw.isNullOrEmpty()) return ""
+      val sb = StringBuilder(raw.length.coerceAtMost(maxLen))
+      var i = 0
+      while (i < raw.length && sb.length < maxLen) {
+        val ch = raw[i]
+        // Eliminar secuencias de escape ANSI ESC [ ... m
+        if (ch.code == 27 && i + 1 < raw.length && raw[i + 1] == '[') {
+          i += 2
+          while (i < raw.length && raw[i] !in '@'..'~') {
+            i++
+          }
+          i++
+          continue
+        }
+        val code = ch.code
+        if (ch == '\n' || ch == '\r' || ch == '\t' || (code >= 32 && code != 127)) {
+          sb.append(ch)
+        }
+        i++
+      }
+      return sb.toString()
     }
 
     fun parseHoneytokensJson(jsonStr: String): List<HoneytokenDto> {

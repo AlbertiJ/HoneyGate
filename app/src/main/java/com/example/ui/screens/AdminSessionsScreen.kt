@@ -30,10 +30,12 @@ fun AdminSessionsScreen(
   onIsolateConfirmed: (MonitoredSessionEntity) -> Unit,
   onUnblockConfirmed: (MonitoredSessionEntity) -> Unit,
   onObserveConfirmed: (MonitoredSessionEntity, String) -> Unit,
+  onForgetVisitorConfirmed: (email: String?, deviceId: String?, ip: String?) -> Unit = { _, _, _ -> },
   onRefreshFromDaemon: () -> Unit
 ) {
   var pendingIsolateSession by remember { mutableStateOf<MonitoredSessionEntity?>(null) }
   var pendingObserveSession by remember { mutableStateOf<MonitoredSessionEntity?>(null) }
+  var pendingForgetSession by remember { mutableStateOf<MonitoredSessionEntity?>(null) }
   var observeReasonInput by remember { mutableStateOf("Actividad inusual observada por operador") }
   var selectedSessionFilter by remember { mutableStateOf("All") }
   var sessionSearchQuery by remember { mutableStateOf("") }
@@ -208,7 +210,8 @@ fun AdminSessionsScreen(
             onPromptObserve = {
               observeReasonInput = "Marcada en observación desde panel Android"
               pendingObserveSession = session
-            }
+            },
+            onPromptForget = { pendingForgetSession = session }
           )
         }
       }
@@ -292,6 +295,44 @@ fun AdminSessionsScreen(
       }
     )
   }
+
+  pendingForgetSession?.let { target ->
+    AlertDialog(
+      onDismissRequest = { pendingForgetSession = null },
+      containerColor = DarkSurface,
+      titleContentColor = AlertRed,
+      textContentColor = TextSecondary,
+      icon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = AlertRed) },
+      title = { Text("Borrar Datos de Visitante", fontSize = 13.sp, fontWeight = FontWeight.Bold) },
+      text = {
+        Text(
+          "¿Confirmás eliminar todas las sesiones, eventos y desafíos OTP asociados a este visitante (${target.ipAddress} / ${target.deviceId})? Se conservará un evento de auditoría sin datos personales.",
+          fontSize = 11.sp,
+          color = TextPrimary,
+          lineHeight = 15.sp
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            val emailArg = target.visitorLabel.trim().takeIf { it.contains("@") }
+            val devArg = target.deviceId.trim().takeIf { it.isNotEmpty() }
+            val ipArg = target.ipAddress.trim().takeIf { it.isNotEmpty() }
+            onForgetVisitorConfirmed(emailArg, devArg, ipArg)
+            pendingForgetSession = null
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = AlertRed, contentColor = Color.White)
+        ) {
+          Text("Confirmar Borrado", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { pendingForgetSession = null }) {
+          Text("Cancelar", color = TextSecondary, fontSize = 11.sp)
+        }
+      }
+    )
+  }
 }
 
 @Composable
@@ -299,7 +340,8 @@ fun SessionItemCard(
   session: MonitoredSessionEntity,
   onPromptIsolate: () -> Unit,
   onUnblock: () -> Unit,
-  onPromptObserve: () -> Unit
+  onPromptObserve: () -> Unit,
+  onPromptForget: () -> Unit
 ) {
   var isExpanded by remember { mutableStateOf(false) }
   val isIsolated = session.currentStatus == "isolated" || session.isMacBlocked
@@ -454,6 +496,21 @@ fun SessionItemCard(
           }
           session.honeytokenTouched?.let {
             Text("• honeytoken_touched: $it", fontSize = 9.sp, color = AlertRed, fontFamily = FontFamily.Monospace)
+          }
+          if (!session.isDemo) {
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedButton(
+              onClick = onPromptForget,
+              colors = ButtonDefaults.outlinedButtonColors(contentColor = AlertRed),
+              border = androidx.compose.foundation.BorderStroke(1.dp, AlertRed.copy(alpha = 0.6f)),
+              modifier = Modifier
+                .fillMaxWidth()
+                .minimumInteractiveComponentSize()
+            ) {
+              Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(14.dp))
+              Spacer(modifier = Modifier.width(6.dp))
+              Text("Borrar datos de este visitante", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
           }
         }
       }

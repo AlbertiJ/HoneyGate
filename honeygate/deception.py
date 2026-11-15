@@ -8,13 +8,30 @@ HONEYGATE DECEPTION: Servicios Emulados Seguros, Honeytokens y Plantilla CSP
 ================================================================================
 """
 
+import os
 import re
 import json
+import struct
 from typing import Any, Dict, List, Optional, Tuple
+
+from honeygate.mitre import get_mitre_engine
 
 MAX_LINE_BYTES = 512
 MAX_COMMANDS_PER_SESSION = 20
 MAX_SESSION_DURATION_SEC = 120.0
+
+# Perfil único unificado del host emulado (Debian 12 / Bookworm)
+HOST_PROFILE: Dict[str, str] = {
+    "os_name": "Debian GNU/Linux 12 (bookworm)",
+    "os_short": "Debian 12",
+    "hostname": "srv-app-02",
+    "kernel_release": "6.1.0-26-amd64",
+    "uname_full": "Linux srv-app-02 6.1.0-26-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.112-1 (2024-09-30) x86_64 GNU/Linux",
+    "ssh_banner": "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2",
+    "telnet_banner": "Debian GNU/Linux 12 (bookworm) srv-app-02\r\nlogin: ",
+    "http_server": "Apache/2.4.57 (Debian)",
+    "mysql_server_version": "8.0.39-0+deb12u1",
+}
 
 DEFAULT_PORTAL_TEMPLATE: Dict[str, str] = {
     "title": "HoneyGate — Portal Cautivo",
@@ -108,10 +125,15 @@ FIXED_SHELL_RESPONSES: Dict[str, bytes] = {
     "id": b"uid=1001(guest) gid=1001(guest) groups=1001(guest)\r\n",
     "whoami": b"guest\r\n",
     "pwd": b"/home/guest\r\n",
-    "hostname": b"srv-app-02\r\n",
+    "hostname": (HOST_PROFILE["hostname"] + "\r\n").encode("ascii"),
     "uname": b"Linux\r\n",
-    "uname -a": b"Linux srv-app-02 6.6.9-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\r\n",
-    "uname -r": b"6.6.9-amd64\r\n",
+    "uname -a": (HOST_PROFILE["uname_full"] + "\r\n").encode("ascii"),
+    "uname -r": (HOST_PROFILE["kernel_release"] + "\r\n").encode("ascii"),
+    "cat /etc/os-release": (
+        b'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\r\n'
+        b'NAME="Debian GNU/Linux"\r\n'
+        b'VERSION_ID="12"\r\n'
+    ),
     "ls": b"backup_notes.txt  config.decoy  readme.txt\r\n",
     "ls -la": (
         b"total 24\r\n"
@@ -340,11 +362,60 @@ def validate_portal_template_config(raw_tpl: Any) -> Tuple[Optional[Dict[str, st
     return merged, None
 
 
+def build_mysql_handshake_v10(connection_id: int = 101) -> bytes:
+    """
+    Construye un paquete binario real Initial Handshake v10 del protocolo MySQL
+    coherente con HOST_PROFILE (Debian 12) para respuestas iniciales emuladas.
+    """
+    version_bytes = HOST_PROFILE["mysql_server_version"].encode("ascii") + b"\x00"
+    scramble = bytes((b % 94) + 33 for b in os.urandom(20))
+    auth_part_1 = scramble[:8]
+    auth_part_2 = scramble[8:20] + b"\x00"  # 13 bytes (12 + NUL)
+
+    # Capabilities: CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH
+    cap_lower = 0xF7FF
+    cap_upper = 0x81FF  # bit 0x0008 = CLIENT_PLUGIN_AUTH
+    charset = 0x21  # utf8_general_ci
+    status_flags = 0x0002  # SERVER_STATUS_AUTOCOMMIT
+    auth_data_len = len(auth_part_1) + len(auth_part_2)  # 21 bytes
+
+    payload = bytearray()
+    payload.append(0x0A)  # protocol_version = 10
+    payload.extend(version_bytes)
+    payload.extend(struct.pack("<I", connection_id))
+    payload.extend(auth_part_1)
+    payload.append(0x00)  # filler
+    payload.extend(struct.pack("<H", cap_lower))
+    payload.append(charset)
+    payload.extend(struct.pack("<H", status_flags))
+    payload.extend(struct.pack("<H", cap_upper))
+    payload.append(auth_data_len)
+    payload.extend(b"\x00" * 10)  # reserved
+    payload.extend(auth_part_2)
+    payload.extend(b"mysql_native_password\x00")
+
+    pkt_header = len(payload).to_bytes(3, "little") + b"\x00"  # sequence_id = 0
+    return pkt_header + bytes(payload)
+
+
+def build_mysql_err_packet(
+    error_code: int = 1045,
+    sql_state: str = "28000",
+    message: str = "Access denied for user",
+    sequence_id: int = 2,
+) -> bytes:
+    """Construye un paquete binario ERR_Packet válido del protocolo MySQL (0xFF)."""
+    state_bytes = sql_state.encode("ascii", errors="ignore")[:5].ljust(5, b"0")
+    payload = b"\xff" + struct.pack("<H", error_code) + b"#" + state_bytes + message.encode("utf-8")
+    pkt_header = len(payload).to_bytes(3, "little") + bytes([sequence_id & 0xFF])
+    return pkt_header + payload
+
+
 def _build_http_response(status_code: int, body: bytes, content_type: str = "text/plain; charset=utf-8") -> bytes:
     reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"}.get(status_code, "OK")
     headers = (
         f"HTTP/1.1 {status_code} {reason}\r\n"
-        f"Server: Apache/2.4.57 (Debian)\r\n"
+        f"Server: {HOST_PROFILE['http_server']}\r\n"
         f"Content-Type: {content_type}\r\n"
         f"Content-Length: {len(body)}\r\n"
         f"Connection: close\r\n\r\n"
@@ -362,11 +433,11 @@ class EmulatedServiceEngine:
     def banner_for_service(service: str) -> bytes:
         svc = (service or "").lower()
         if svc == "ssh":
-            return b"SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2\r\n"
+            return (HOST_PROFILE["ssh_banner"] + "\r\n").encode("ascii")
         if svc == "telnet":
-            return b"Ubuntu 22.04.4 LTS\r\nlogin: "
+            return HOST_PROFILE["telnet_banner"].encode("ascii")
         if svc == "mysql":
-            return b"5.7.42-0ubuntu0.18.04.1\r\n"
+            return build_mysql_handshake_v10()
         return b""
 
     @staticmethod
@@ -393,6 +464,8 @@ class EmulatedServiceEngine:
         clean_text = sanitize_captured_text(raw_line, max_len=MAX_LINE_BYTES)
         tokens_cfg = honeytokens or []
 
+        mitre_engine = get_mitre_engine()
+
         # 1. Servicio HTTP / HTTPS emulado (respuesta desde tabla fija por ruta)
         if svc in ("http", "https"):
             parts = clean_text.split()
@@ -404,7 +477,7 @@ class EmulatedServiceEngine:
                 return _build_http_response(400, b"Bad Request\n"), {
                     "event_type": "DECEPTION_HTTP_PROBE",
                     "severity": "normal",
-                    "mitre_technique": "T1190",
+                    "mitre_technique": mitre_engine.resolve_event("DECEPTION_HTTP_BAD_METHOD"),
                     "captured_text": clean_text,
                     "honeytoken_touched": None,
                 }
@@ -423,7 +496,7 @@ class EmulatedServiceEngine:
                 return _build_http_response(200, body, content_type=ctype), {
                     "event_type": "HONEYTOKEN_TOUCHED",
                     "severity": "critical",
-                    "mitre_technique": "T1552",
+                    "mitre_technique": mitre_engine.resolve_command(svc, path_only, "HONEYTOKEN_TOUCHED"),
                     "captured_text": clean_text,
                     "honeytoken_touched": first_ht["name"],
                 }
@@ -436,7 +509,7 @@ class EmulatedServiceEngine:
                 return _build_http_response(status_code, body, content_type=ctype), {
                     "event_type": "DECEPTION_HTTP_PROBE",
                     "severity": "normal" if status_code == 200 else "warning",
-                    "mitre_technique": "T1595",
+                    "mitre_technique": mitre_engine.resolve_command(svc, path_only, "DECEPTION_HTTP_PROBE"),
                     "captured_text": clean_text,
                     "honeytoken_touched": None,
                 }
@@ -444,17 +517,17 @@ class EmulatedServiceEngine:
             return _build_http_response(404, b"Not Found\n"), {
                 "event_type": "DECEPTION_HTTP_PROBE",
                 "severity": "normal",
-                "mitre_technique": "T1595",
+                "mitre_technique": mitre_engine.resolve_command(svc, path_only, "DECEPTION_HTTP_PROBE"),
                 "captured_text": clean_text,
                 "honeytoken_touched": None,
             }
 
-        # 2. Servicio MySQL emulado (respuesta estática fija)
+        # 2. Servicio MySQL emulado (respuesta binaria ERR_Packet 1045)
         if svc == "mysql":
-            return b"ERROR 1045 (28000): Access denied for user\r\n", {
+            return build_mysql_err_packet(1045, "28000", "Access denied for user", sequence_id=2), {
                 "event_type": "DECEPTION_MYSQL_PROBE",
                 "severity": "warning",
-                "mitre_technique": "T1190",
+                "mitre_technique": mitre_engine.resolve_event("DECEPTION_MYSQL_PROBE"),
                 "captured_text": clean_text,
                 "honeytoken_touched": None,
             }
@@ -479,7 +552,7 @@ class EmulatedServiceEngine:
             return err_resp, {
                 "event_type": "DECEPTION_EGRESS_BLOCKED",
                 "severity": "critical",
-                "mitre_technique": "T1041",
+                "mitre_technique": mitre_engine.resolve_command(svc, normalized, "DECEPTION_EGRESS_BLOCKED"),
                 "captured_text": clean_text,
                 "honeytoken_touched": None,
             }
@@ -491,7 +564,7 @@ class EmulatedServiceEngine:
             return ht_line, {
                 "event_type": "HONEYTOKEN_TOUCHED",
                 "severity": "critical",
-                "mitre_technique": "T1552",
+                "mitre_technique": mitre_engine.resolve_command(svc, normalized, "HONEYTOKEN_TOUCHED"),
                 "captured_text": clean_text,
                 "honeytoken_touched": matched_ht["name"],
             }
@@ -506,7 +579,7 @@ class EmulatedServiceEngine:
             return lines.encode("utf-8"), {
                 "event_type": "HONEYTOKEN_TOUCHED",
                 "severity": "critical",
-                "mitre_technique": "T1552",
+                "mitre_technique": mitre_engine.resolve_command(svc, normalized, "HONEYTOKEN_TOUCHED"),
                 "captured_text": clean_text,
                 "honeytoken_touched": first_ht["name"],
             }
@@ -516,7 +589,7 @@ class EmulatedServiceEngine:
             return FIXED_SHELL_RESPONSES[lower_norm], {
                 "event_type": "DECEPTION_COMMAND_CAPTURED",
                 "severity": "warning",
-                "mitre_technique": "T1059",
+                "mitre_technique": mitre_engine.resolve_command(svc, normalized, "DECEPTION_COMMAND_CAPTURED"),
                 "captured_text": clean_text,
                 "honeytoken_touched": None,
             }
@@ -525,7 +598,7 @@ class EmulatedServiceEngine:
         return b"bash: command not found\r\n", {
             "event_type": "DECEPTION_COMMAND_CAPTURED",
             "severity": "normal",
-            "mitre_technique": "T1059",
+            "mitre_technique": mitre_engine.resolve_command(svc, normalized, "DECEPTION_COMMAND_CAPTURED"),
             "captured_text": clean_text,
             "honeytoken_touched": None,
         }

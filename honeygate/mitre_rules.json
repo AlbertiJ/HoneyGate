@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "techniques": {
+    "T1041": {
+      "name": "Exfiltration Over C2 Channel",
+      "tactic": "Exfiltration"
+    },
+    "T1046": {
+      "name": "Network Service Discovery",
+      "tactic": "Discovery"
+    },
+    "T1053": {
+      "name": "Scheduled Task/Job",
+      "tactic": "Persistence"
+    },
+    "T1059": {
+      "name": "Command and Scripting Interpreter",
+      "tactic": "Execution"
+    },
+    "T1078": {
+      "name": "Valid Accounts",
+      "tactic": "Initial Access"
+    },
+    "T1082": {
+      "name": "System Information Discovery",
+      "tactic": "Discovery"
+    },
+    "T1087": {
+      "name": "Account Discovery",
+      "tactic": "Discovery"
+    },
+    "T1110": {
+      "name": "Brute Force",
+      "tactic": "Credential Access"
+    },
+    "T1190": {
+      "name": "Exploit Public-Facing Application",
+      "tactic": "Initial Access"
+    },
+    "T1548": {
+      "name": "Abuse Elevation Control Mechanism",
+      "tactic": "Privilege Escalation"
+    },
+    "T1552": {
+      "name": "Unsecured Credentials",
+      "tactic": "Credential Access"
+    },
+    "T1595": {
+      "name": "Active Scanning",
+      "tactic": "Reconnaissance"
+    }
+  },
+  "event_type_rules": {
+    "IP_ISOLATED_RATE_LIMIT": "T1046",
+    "IP_ISOLATED_MANUAL": "",
+    "SESSION_OBSERVED": "T1078",
+    "ANTISYBIL_DISPOSABLE_DOMAIN": "T1078",
+    "ANTISYBIL_OBSERVATION": "T1078",
+    "AUTH_FAILED": "T1110",
+    "COWRIE_LOGIN_FAILED": "T1110",
+    "AUTH_ACCEPTED": "T1078",
+    "COWRIE_LOGIN_SUCCESS": "T1078",
+    "HONEYWALL_CONTAINMENT": "",
+    "DECEPTION_SESSION_TIMEOUT": "T1059",
+    "DECEPTION_COMMAND_LIMIT_EXCEEDED": "T1059",
+    "DECEPTION_LINE_LIMIT_EXCEEDED_HTTP": "T1190",
+    "DECEPTION_LINE_LIMIT_EXCEEDED_SHELL": "T1059",
+    "DECEPTION_EGRESS_BLOCKED": "T1041",
+    "HONEYTOKEN_TOUCHED": "T1552",
+    "DECEPTION_HTTP_BAD_METHOD": "T1190",
+    "DECEPTION_HTTP_PROBE": "T1595",
+    "DECEPTION_MYSQL_PROBE": "T1190",
+    "DECEPTION_COMMAND_CAPTURED": "T1059"
+  },
+  "command_rules": [
+    {
+      "id": "egress_tools",
+      "services": ["ssh", "telnet", "shell"],
+      "pattern": "^(curl|wget|nc|ncat|netcat|ping|dig|nslookup|host|ssh|scp|ftp|telnet)\\b",
+      "technique": "T1041"
+    },
+    {
+      "id": "credential_files",
+      "services": ["ssh", "telnet", "shell", "http", "https"],
+      "pattern": "(\\.env|secrets\\.json|config\\.decoy|credentials\\.txt|backup_keys\\.txt|/etc/shadow)",
+      "technique": "T1552"
+    },
+    {
+      "id": "priv_esc_sudo",
+      "services": ["ssh", "telnet", "shell"],
+      "pattern": "^(sudo|su)\\b",
+      "technique": "T1548"
+    },
+    {
+      "id": "persistence_cron",
+      "services": ["ssh", "telnet", "shell"],
+      "pattern": "\\b(crontab|/etc/cron)\\b",
+      "technique": "T1053"
+    },
+    {
+      "id": "system_discovery",
+      "services": ["ssh", "telnet", "shell"],
+      "pattern": "^(uname|hostname|ifconfig|ip\\s+addr)\\b",
+      "technique": "T1082"
+    },
+    {
+      "id": "account_discovery",
+      "services": ["ssh", "telnet", "shell"],
+      "pattern": "^(id|whoami)\\b",
+      "technique": "T1087"
+    },
+    {
+      "id": "http_exploit_paths",
+      "services": ["http", "https"],
+      "pattern": "(/wp-login|/phpmyadmin|/\\.git|/actuator)",
+      "technique": "T1190"
+    }
+  ]
+}
