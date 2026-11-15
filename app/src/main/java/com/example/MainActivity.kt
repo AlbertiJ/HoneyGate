@@ -8,7 +8,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -271,7 +270,7 @@ fun HoneyGateMainApp(viewModel: HoneyGateViewModel = viewModel()) {
             onFilterSelected = { viewModel.setFilter(it) },
             onSearchQueryChanged = { viewModel.setSearchQuery(it) },
             onIsolateIpConfirmed = { ip, devId -> viewModel.isolateIpFromEventConfirmed(ip, devId) },
-            onDeleteEvent = { viewModel.clearAllEvents() },
+            onDeleteEvent = { id -> viewModel.deleteEvent(id) },
             onRefreshFromDaemon = { viewModel.syncDaemonData() }
           )
           1 -> HoneygateScreen(

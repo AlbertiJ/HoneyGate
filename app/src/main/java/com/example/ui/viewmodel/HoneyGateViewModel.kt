@@ -392,9 +392,9 @@ class HoneyGateViewModel(application: Application) : AndroidViewModel(applicatio
     }
   }
 
-  fun clearAllEvents() {
+  fun deleteEvent(id: Long) {
     viewModelScope.launch {
-      repository.clearAllEvents()
+      repository.deleteEvent(id)
     }
   }
 

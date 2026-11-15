@@ -117,6 +117,7 @@ def run_tests():
                     host="127.0.0.1",
                     port=38888,
                     storage=storage,
+                    portal_secret_path=os.path.join(tmpdir, "portal_secret_1"),
                 )
                 api2 = AsyncDashboardServer(
                     honeywall=honeywall,
@@ -124,6 +125,7 @@ def run_tests():
                     host="127.0.0.1",
                     port=38889,
                     storage=storage,
+                    portal_secret_path=os.path.join(tmpdir, "portal_secret_2"),
                 )
                 assert api1.api_token and api2.api_token, "Los tokens generados no pueden estar vacíos"
                 assert api1.api_token != api2.api_token, "Dos instancias sin env var deben generar tokens distintos"
@@ -374,6 +376,7 @@ def run_tests():
                 host="127.0.0.1",
                 port=38890,
                 storage=p_storage,
+                portal_secret_path=portal_secret_file,
             )
             p_portal = AsyncPortalServer(
                 storage=p_storage,
@@ -1389,6 +1392,42 @@ def run_tests():
                 pass
     assert not hits, f"Se encontraron apariciones prohibidas del token fijo en: {hits}"
     print("       -> Ningún archivo del proyecto contiene el token fijo antiguo: OK")
+
+    print("[TEST] 14. Validando Fase 6: .env.example vacío, systemd endurecido, CI y .gitignore...")
+    with open(os.path.join(root_dir, ".env.example"), "r", encoding="utf-8") as fh:
+        env_lines = [ln.strip() for ln in fh.read().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    assert len(env_lines) >= 15
+    for ln in env_lines:
+        assert "=" in ln and ln.split("=", 1)[1] == "", f".env.example debe tener valores vacíos: {ln}"
+
+    with open(os.path.join(root_dir, ".gitignore"), "r", encoding="utf-8") as fh:
+        gi_text = fh.read()
+    assert "logs/*" in gi_text and "data/*" in gi_text
+
+    systemd_path = os.path.join(root_dir, "deploy", "systemd", "honeygate.service")
+    with open(systemd_path, "r", encoding="utf-8") as fh:
+        sd_text = fh.read()
+    for directive in (
+        "NoNewPrivileges=yes",
+        "PrivateTmp=yes",
+        "ProtectSystem=strict",
+        "ReadWritePaths=",
+        "WantedBy=default.target",
+    ):
+        assert directive in sd_text, f"Falta directiva systemd: {directive}"
+
+    ci_path = os.path.join(root_dir, ".github", "workflows", "tests.yml")
+    with open(ci_path, "r", encoding="utf-8") as fh:
+        ci_text = fh.read()
+    assert "python3 test_honeygate.py" in ci_text
+    assert "contents: read" in ci_text
+    assert "secrets." not in ci_text
+
+    import run_framework
+    os.environ["HONEYGATE_HEADLESS"] = "1"
+    assert run_framework._is_headless_mode() is True
+    os.environ.pop("HONEYGATE_HEADLESS", None)
+    print("       -> Entorno vacío, systemd, CI read-only y exclusión data/logs en .gitignore: OK")
 
     print("\n\033[1;32m[✓] TODAS LAS PRUEBAS DE INTEGRACIÓN Y SEGURIDAD PASARON EXITOSAMENTE.\033[0m")
 

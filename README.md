@@ -1,240 +1,198 @@
-# 🛡️ HoneyGate — Framework Defensivo de Decepción, Contención Perimetral y Telemetría Forense
+# 🛡️ HoneyGate — Framework Defensivo de Decepción, Contención y Telemetría Forense
 
-[![Plataforma](https://img.shields.io/badge/Plataforma-Kali%20Linux%20%7C%20WSL2%20%7C%20Android-10b981.svg)](#)
-[![Licencia](https://img.shields.io/badge/Licencia-Uso%20Defensivo%20%2F%20Blue%20Team-06b6d4.svg)](#)
-[![Python](https://img.shields.io/badge/Python-3.11%2B%20(epoll%20ET)-f59e0b.svg)](#)
-[![Android](https://img.shields.io/badge/Android-Jetpack%20Compose%20%7C%20Room-ef4444.svg)](#)
+[![Python](https://img.shields.io/badge/Python-3.11%2B%20(epoll%20ET)-06b6d4.svg)](#)
+[![Android](https://img.shields.io/badge/Android-Jetpack%20Compose%20%7C%20Room-10b981.svg)](#)
+[![Privilegios](https://img.shields.io/badge/Ejecución-Non--Root%20User%20Space-f59e0b.svg)](#)
 
-**HoneyGate** es un ecosistema defensivo integrado para operaciones de Blue Team, detección de intrusos y decepción de espacio de usuario (*Non-Root*). Combina un motor de red asíncrono de alto rendimiento en Linux/Python con un panel de telemetría y control táctico móvil desarrollado en Android (Jetpack Compose + Room Database).
-
----
-
-## 🍯 Los 5 Invariantes Obligatorios de HoneyGate
-
-Para garantizar máxima fidelidad defensiva y rigurosidad legal, HoneyGate implementa cinco reglas arquitectónicas inviolables:
-
-1. **🆔 Identidad por Fingerprint Compuesto (`device_id`)**:
-   * Nunca se identifica a un visitante únicamente por IP o MAC física (debido a la aleatorización de direcciones MAC en smartphones modernos y el enmascaramiento por NAT).
-   * Se genera un identificador determinista combinando:
-     $$\text{device\_id} = \text{SHA256}(\text{MAC-por-SSID} + \text{Browser Fingerprint} + \text{JA3/JA4 TLS} + \text{DHCP Option 55})$$
-2. **🚧 Contención Estricta de Tráfico Saliente (*Egress Control*)**:
-   * Los entornos de decepción **nunca** poseen salida irrestricta a Internet para prevenir pivoteos o ataques secundarios.
-   * La salida está contenida y restringida exclusivamente a una lista blanca de FQDNs autorizados o redirigida a un *sinkhole* defensivo local con registro de anomalías.
-3. **🔑 Honeytokens Controlados por el Operador**:
-   * Toda credencial señuelo, correo canario o token de autenticación embebido es estrictamente ficticio y operado por el administrador.
-   * Cualquier consulta o intento de uso de estos señuelos dispara alertas críticas instantáneas en la matriz forense.
-4. **⚖️ Cumplimiento Legal y Consentimiento Explícito (AR)**:
-   * En portales cautivos (Modos 1 y 3) solo se recopilan metadatos de conexión, nunca el contenido del tráfico de usuarios legítimos.
-   * Incorpora aviso legal explícito bajo la **Ley 25.326** de Protección de Datos Personales de la República Argentina y opera exclusivamente en redes autorizadas bajo la **Ley 26.388** de Delitos Informáticos.
-5. **⚠️ Confirmación Obligatoria en Acciones Destructivas**:
-   * Ningún bloqueo perimetral, revocación de credenciales o purga forense puede ejecutarse de manera accidental: el panel exige confirmación explícita mediante diálogo modal.
+**HoneyGate** es un daemon defensivo sin privilegios `root` para Linux (`select.epoll` + `inotify` nativo vía `ctypes` + SQLite) acompañado de un panel de control en Android (Jetpack Compose + Room). Permite operar un portal cautivo liviano con verificación OTP, servicios de decepción con perfil unificado **Debian 12**, registro forense con mapeo MITRE ATT&CK externo, exportación de informes (`/api/report`) y purga de datos personales.
 
 ---
 
-## 🕹️ Modos de Operación
+## ⚠️ Qué NO hace el daemon (Alcance Explícito)
 
-HoneyGate se adapta dinámicamente a tres escenarios operacionales desde su panel de administración:
+HoneyGate se ejecuta en espacio de usuario **sin privilegios `root`**. Por diseño:
 
-```
-                  ┌──────────────────────────────────────────────┐
-                  │          🛡️ HONEYGATE ARCHITECTURE           │
-                  └──────────────────────┬───────────────────────┘
-                                         │
-        ┌────────────────────────────────┼────────────────────────────────┐
-        ▼                                ▼                                ▼
- 🌐 MODO 1: PORTAL CAUTIVO        🎯 MODO 2: HONEYPOT AUDIT        🔀 MODO 3: MODO MIXTO
-  * Registro solo email            * Simulación Assume-Breach       * Portal opcional
-  * Control Anti-Sybil             * 3 Canarios (Admin/Fin/IT)      * Egress medido a Internet
-  * Arrendamiento DHCP 300s        * MySQL / Apache / SSH / Telnet  * Escáner activo de red
-  * Observación por rotación MAC   * Contención Sinkhole estricta   * Correlación de anomalías
+1. **NO redirige el WiFi ni el tráfico DNS/HTTP de la red:** La captura o redirección de clientes hacia el portal cautivo o los puertos señuelo la realiza el router, punto de acceso (AP) o firewall de borde.
+2. **NO limita el ancho de banda:** El campo `bandwidth_kbps` es únicamente un valor **sugerido (no aplicado por el daemon)**; el control real de QoS / tráfico lo aplica el router.
+3. **NO corta la salida a internet de los clientes ni administra DHCP real:** El campo `dhcp_lease_sec` también es **sugerido (no aplicado por el daemon)**. HoneyGate no modifica `iptables`/`nftables` ni configura interfaces de red; ante anomalías o aislamiento manual, cierra sus propios descriptores de socket con `shutdown(SHUT_RDWR)` y marca la IP en su tabla interna de contención.
+
+---
+
+## 📋 Requisitos e Instalación
+
+### Backend Linux (Kali Linux / Debian / Ubuntu / WSL2)
+- Python **3.11+** (las pruebas y el núcleo operan con librería estándar; `requirements.txt` agrega utilidades opcionales para CLI y pruebas).
+- Kernel Linux con `epoll` e `inotify` (`libc.so.6`).
+
+```bash
+# 1. Instalar dependencias Python opcionales (ej. prompt_toolkit para consola interactiva)
+pip install -r requirements.txt
+
+# 2. (Opcional) Crear archivo de entorno sin secretos desde la plantilla
+cp .env.example .env
+chmod 600 .env
 ```
 
-### 1. 🌐 Modo 1 — Portal Cautivo con Trazabilidad (Monitoreo Básico)
-* **Registro liviano**: Autenticación orientada a etiqueta con correo electrónico (sin contraseña de fricción).
-* **Mecanismo Anti-Sybil**: Límite de tasa de un máximo de 3 registros por hora por cada `device_id` compuesto.
-* **Filtro de dominios desechables**: Bloqueo proactivo de proveedores temporales (mailinator, 10minutemail, tempmail).
-* **Detección de rotación MAC**: Si un dispositivo altera su MAC pero mantiene el fingerprint del navegador o JA3, entra automáticamente en *modo de observación silenciosa*, permitiendo la navegación mientras audita destinos para inferir perfiles de amenaza.
-* **Lease DHCP corto**: Expiración a los 300 segundos para reevaluar la telemetría del cliente.
+> **Importante:** Las carpetas `data/` y `logs/` contienen estado local (`honeygate.db`, `portal_secret`, bitácoras) y están excluidas de Git en `.gitignore`.
 
-### 2. 🎯 Modo 2 — Honeypot de Auditoría / Red Team (*Assume-Breach*)
-* **Simulación multi-sectorial**: Emula la existencia de 3 identidades comprometidas en la organización:
-  * `admin.portal@honeygate.internal` (Sector Administración)
-  * `finanzas.reportes@honeygate.internal` (Sector Finanzas)
-  * `infra.ops@honeygate.internal` (Sector Infraestructura TI)
-* **Servicios señuelo expuestos**:
-  * Base de datos MySQL (`3306`)
-  * Servidores Web Apache/Nginx (`8080`, `8443`)
-  * Terminal SSH (`2222`)
-  * Servicio Telnet de legado (`2323`)
-* **Honeytokens embebidos**: Archivos falsos `/etc/shadow`, variables `.env` ficticias y tablas con canarios.
-* **Captura MITRE ATT&CK**: Mapeo en tiempo real de técnicas T1078 (Cuentas Válidas), T1110 (Fuerza Bruta), T1059 (Línea de Comandos) y T1046 (Escaneo de Red).
+### Aplicación Android (Panel de Control)
+- Android Studio / Gradle con JDK 11+ y Android SDK configurado.
 
-### 3. 🔀 Modo 3 — Modo Mixto (Portal + Honeypot Unificado)
-* Combina el control perimetral del portal con la decepción activa del honeypot.
-* Otorga acceso a Internet nominal medido a usuarios validados respetando la Ley 25.326/26.388.
-* Incluye un **escáner de red activo** para mapear hosts adyacentes y detectar discrepancias entre direccionamiento IP y firmas físicas.
+```bash
+# Compilar APK debug
+gradle assembleDebug
 
----
-
-## 👁️ Experiencia de Usuario y Diseño Visual (Eye-Care UX)
-
-La aplicación Android de HoneyGate fue concebida para operadores de centros de operaciones de seguridad (SOC) y analistas que pasan largas jornadas frente a pantallas.
-
-* **Paleta Dark de Bajo Brillo**: Elimina neones deslumbrantes que causan fatiga visual.
-  * Fondo Principal: Slate Profundo (`#0F141C`)
-  * Superficies y Tarjetas: Azul Noche Calmo (`#161E2E`)
-  * Estado Normal: Verde Esmeralda Suave (`#10B981`)
-  * Estado Alerted: Ámbar Cálido (`#F59E0B`)
-  * Estado Blocked: Coral Suave No Agresivo (`#EF4444`)
-  * Acentos de Información: Cian Calmo (`#06B6D4`)
-* **Listado Forense con LazyColumn y Chips de Filtrado**: Permite alternar instantáneamente entre eventos `'Blocked'`, `'Alerted'` y `'Normal'`, así como realizar búsquedas textuales por IP, MAC, técnica MITRE o descripción.
-
----
-
-## 💻 Arquitectura del Backend en Linux (Python Non-Root)
-
-El núcleo de red corre en espacio de usuario en Kali Linux o WSL2:
-
-* **I/O Asíncrona con `select.epoll`**: Bucle en modo Edge-Triggered (`EPOLLET`) para gestionar cientos de conexiones concurrentes en puertos altos sin necesidad de privilegios `root`.
-* **Sockets No Bloqueantes**: Descriptores configurados con la bandera `O_NONBLOCK` mediante `fcntl`.
-* **Capa Honeywall con Mitigación Perimetral**:
-  * Control de tráfico saliente con umbral estricto de **10 peticiones por minuto**.
-  * Cierre forzado inmediato mediante `shutdown(socket_fd, SHUT_RDWR)` y `close()` al detectar pivoteos.
-  * Aislamiento en lista de contención y resolución de hardware en `/proc/net/arp`.
-* **Vigilancia Forense con `inotify` de Kernel (`libc.so.6`)**: Monitoreo reactivo de bitácoras sin sondeo continuo de disco, enlazado directamente con llamadas nativas de C vía `ctypes`.
-* **Seguridad Reforzada en la API Web**:
-  * Enlace por defecto a `127.0.0.1`.
-  * Validación obligatoria de token en cabecera `X-Auth-Token` (`secrets.compare_digest`) en **todos** los endpoints `/api/*` (GET y POST), devolviendo `401 Unauthorized` ante solicitudes no autenticadas o sin token configurado (falla cerrada). El token se lee de `HONEYGATE_API_TOKEN` o se genera efímeramente en cada arranque con `secrets.token_urlsafe(32)`.
-  * Sin cabecera `Access-Control-Allow-Origin: *`.
-  * Verificación estricta de direcciones IP con el módulo `ipaddress`.
-  * Sanitización contra XSS en el panel web (sustitución de `innerHTML` por asignaciones seguras de `textContent` y escape de entidades HTML).
-
----
-
-## 🔌 Módulo 1 — Conector Live App Android & Daemon Linux (Control Perimetral Remoto)
-
-El **Módulo 1** establece el puente de comando, telemetría y control perimetral bidireccional en tiempo real entre la aplicación Android y el Daemon de HoneyGate corriendo en Linux (Kali o WSL2):
-
-```
-┌─────────────────────────────────┐                 ┌───────────────────────────────────┐
-│     HONEYGATE ANDROID APP       │                 │      HONEYGATE LINUX DAEMON       │
-│                                 │                 │    (Python 3.11 epoll + ctypes)   │
-│  [TopAppBar Status Badge]       │   HTTP REST     │                                   │
-│  [DaemonControlDialog]          │ ──────────────> │  GET  /api/status                 │
-│  * Latencia de red              │   (Header:      │  GET  /api/connections            │
-│  * Sockets activos en kernel    │    X-Auth-Token)│  GET  /api/alerts                 │
-│  * Ingesta a Room Database      │ <────────────── │                                   │
-│                                 │                 │                                   │
-│  [Acción de Bloqueo Invariante 5]                 │  POST /api/isolate                │
-│  "Aislar IP confirmada"         │ ──────────────> │  -> shutdown(fd, SHUT_RDWR)       │
-│                                 │                 │  -> /proc/net/arp MAC correlation │
-│  "Desbloquear IP"               │ ──────────────> │  POST /api/unblock                │
-└─────────────────────────────────┘                 └───────────────────────────────────┘
+# Ejecutar pruebas unitarias y Robolectric en JVM
+gradle :app:testDebugUnitTest
 ```
 
-### Características Clave del Módulo 1:
-1. **Comprobación de Salud y Latencia (`GET /api/status`)**:
-   * Reporta en vivo el estado del servicio, latencia en milisegundos, conteo de sockets de red activos, total de conexiones atendidas, violaciones de tasa de salida (*rate-limit*) e IPs actualmente aisladas. Requiere `X-Auth-Token`.
-2. **Sincronización de Telemetría a Room (`GET /api/connections` y `GET /api/alerts`)**:
-   * Las sesiones activas en el bucle epoll son ingestadas directamente a `MonitoredSessionEntity` con cálculo dinámico del `device_id` compuesto.
-   * Las alertas forenses de kernel (*inotify*) se almacenan automáticamente en `ForensicEvent` para correlación defensiva y generación de reportes.
-   * La base Room (`honeygate_security.db`) está excluida de respaldos en `backup_rules.xml` y `data_extraction_rules.xml` para proteger el token almacenado.
-3. **Mitigación Perimetral Remota a Nivel de Kernel (`POST /api/isolate` / `POST /api/unblock`)**:
-   * Al confirmar un bloqueo en el panel Android (cumpliendo el **Invariante 5**), se despacha una orden autenticada con `X-Auth-Token` (si el token está vacío en la app, no se contacta al daemon y se solicita configurarlo).
-   * El Daemon en Linux localiza el descriptor de socket (`fd`) asociado y ejecuta inmediatamente la llamada al sistema nativa `shutdown(socket_fd, SHUT_RDWR)`, cerrando físicamente la conexión del atacante.
-4. **Conectividad Segura (Emulador y Celular Físico por Túnel ADB)**:
-   * `network_security_config.xml` prohíbe tráfico HTTP en claro de forma global y lo habilita **únicamente** hacia `127.0.0.1` y `10.0.2.2`.
-   * **Emulador Android**: usar `http://10.0.2.2:8888`.
-   * **Celular físico por USB**: abrir túnel inverso hacia el daemon local en `127.0.0.1:8888` y configurar `http://127.0.0.1:8888` en la app:
+---
+
+## 🚀 Arranque y Pruebas
+
+### 1. Ejecución manual interactiva (terminal con CLI)
+```bash
+# Token administrativo recomendado (si se omite, genera uno efímero en cada arranque)
+export HONEYGATE_API_TOKEN="tu_token_largo_aleatorio"
+
+python3 run_framework.py
+```
+
+### 2. Ejecución headless (sin consola interactiva)
+```bash
+HONEYGATE_HEADLESS=1 python3 run_framework.py
+```
+Cuando no hay TTY interactiva (por ejemplo bajo `systemd`), `run_framework.py` entra automáticamente en modo headless y espera señales `SIGINT`/`SIGTERM`.
+
+### 3. Servicio `systemd` de usuario (con endurecimiento)
+El repositorio incluye una unidad de ejemplo endurecida en [`deploy/systemd/honeygate.service`](deploy/systemd/honeygate.service) con:
+- `NoNewPrivileges=yes`
+- `PrivateTmp=yes`
+- `ProtectSystem=strict`
+- `ReadWritePaths=%h/HoneyGate/data %h/HoneyGate/logs` (acceso de escritura restringido exclusivamente a `data/` y `logs/`)
+
+Instalación para el usuario actual (ajustando la ruta si el repo no está en `~/HoneyGate`):
+```bash
+mkdir -p ~/.config/systemd/user data logs
+cp deploy/systemd/honeygate.service ~/.config/systemd/user/honeygate.service
+systemctl --user daemon-reload
+systemctl --user enable --now honeygate.service
+systemctl --user status honeygate.service
+```
+
+### 4. Batería de pruebas automáticas
+```bash
+python3 test_honeygate.py
+```
+
+---
+
+## 🔧 Variables de Entorno
+
+Todas las variables son configurables vía entorno o `.env` (ver [`.env.example`](.env.example), que se distribuye con valores vacíos y sin secretos):
+
+| Variable | Valor por defecto | Descripción |
+| --- | --- | --- |
+| `HONEYGATE_API_TOKEN` | *(generado con `secrets.token_urlsafe(32)`)* | Token obligatorio en cabecera `X-Auth-Token` para todos los endpoints `/api/*`. |
+| `HONEYGATE_API_HOST` | `127.0.0.1` | Interfaz de escucha del panel web y API REST administrativa. |
+| `HONEYGATE_API_PORT` | `8888` | Puerto TCP de la API REST y panel web administrativo. |
+| `HONEYGATE_EPOLL_HOST` | `127.0.0.1` | Interfaz de escucha de los puertos emulados (`epoll`). Cambiar solo explícitamente. |
+| `HONEYGATE_HEADLESS` | `0` (`1` auto si no hay TTY) | `1`/`true` desactiva la consola CLI interactiva para correr como daemon/systemd. |
+| `HONEYGATE_PORTAL_HOST` | `127.0.0.1` | Interfaz de escucha del servidor HTTP del portal cautivo (Modo 1). |
+| `HONEYGATE_PORTAL_PORT` | `8090` | Puerto TCP del portal cautivo (debe ser distinto a `HONEYGATE_API_PORT`). |
+| `HONEYGATE_PORTAL_SECRET` | *(generado en `data/portal_secret`, chmod `600`)* | Clave HMAC-SHA256 para hashear correos en `otp_challenges` y `portal_registrations`. |
+| `HONEYGATE_PORTAL_LAB_MODE` | `0` | Si es `1`/`true`/`yes`, registra el código OTP en log de laboratorio (desactivado en producción). |
+| `HONEYGATE_PORTAL_OTP_OPTIONAL` | `0` | Si es `1`/`true`/`yes`, habilita `/portal/register` sin OTP previo y marca la sesión `"mail sin verificar"`. |
+| `HONEYGATE_SMTP_HOST` | `""` *(vacío)* | Servidor SMTP para entregar códigos OTP del portal. Obligatorio si no está en modo laboratorio. |
+| `HONEYGATE_SMTP_PORT` | `587` | Puerto del servidor SMTP. |
+| `HONEYGATE_SMTP_USER` | `""` *(vacío)* | Usuario de autenticación SMTP. |
+| `HONEYGATE_SMTP_PASS` | `""` *(vacío)* | Contraseña SMTP (leída únicamente desde variable de entorno, nunca en SQLite ni logs). |
+| `HONEYGATE_SMTP_PASSWORD` | `""` *(vacío)* | Alias alternativo de `HONEYGATE_SMTP_PASS` si este último está vacío. |
+| `HONEYGATE_SMTP_FROM` | `HONEYGATE_SMTP_USER` o `noreply@honeygate.local` | Dirección remitente (`From`) de los correos OTP. |
+| `HONEYGATE_SMTP_USE_TLS` | `1` | `1` habilita `STARTTLS` en la conexión SMTP saliente (`0`/`false`/`no` para desactivar). |
+| `HONEYGATE_SMTP_USE_SSL` | `0` | `1`/`true`/`yes` utiliza `SMTP_SSL` en lugar de SMTP plano + `STARTTLS`. |
+| `HONEYGATE_MITRE_RULES_PATH` | `honeygate/mitre_rules.json` | Ruta al archivo JSON externo de reglas MITRE ATT&CK validado al iniciar. |
+
+---
+
+## 🌐 Puertos y Servicios Abiertos
+
+Por defecto, todos los servicios escuchan únicamente en `127.0.0.1` en puertos no privilegiados (`>1024`):
+
+| Puerto | Servicio | Interfaz por defecto | Comportamiento real |
+| --- | --- | --- | --- |
+| `8888/TCP` | API REST + Panel Web | `127.0.0.1` | Endpoints `/api/*` protegidos por `X-Auth-Token`. |
+| `8090/TCP` | Portal Cautivo (Modo 1) | `127.0.0.1` | HTML estático con CSP estricta (`script-src 'none'`), OTP y Anti-Sybil. Sin acceso al token ni a `/api/*`. |
+| `2222/TCP` | SSH emulado | `127.0.0.1` | Banner Debian 12 (`SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3`) y tabla fija sin ejecución. |
+| `2323/TCP` | Telnet emulado | `127.0.0.1` | Banner Debian 12 (`srv-app-02`) con comandos de lectura fija y límites por sesión/línea. |
+| `8080/TCP` | HTTP emulado | `127.0.0.1` | Cabecera `Apache/2.4.57 (Debian)`, respuestas estáticas y detección de honeytokens. |
+| `8443/TCP` | HTTPS-señuelo (HTTP plano) | `127.0.0.1` | Sirve respuestas HTTP emuladas con el mismo perfil Debian 12 (no termina TLS nativo). |
+| `3306/TCP` | MySQL emulado | `127.0.0.1` | Saludo binario real `Protocol::HandshakeV10` (`8.0.39-0+deb12u1`) y respuestas binarias `ERR_Packet`. |
+
+---
+
+## 📱 Conexión desde el Celular Físico (Túnel ADB) y Emulador
+
+La app Android restringe HTTP en texto claro mediante `network_security_config.xml` exclusivamente a `127.0.0.1` y `10.0.2.2` (y bloquea copias de seguridad de la base Room en `backup_rules.xml` / `data_extraction_rules.xml`):
+
+- **Emulador Android:** Configurar el endpoint en la app como `http://10.0.2.2:8888` e ingresar el `HONEYGATE_API_TOKEN` activo en el daemon.
+- **Celular físico por USB (Depuración USB activa):**
+  1. Redirigir el puerto del teléfono hacia el daemon local en Linux:
      ```bash
      adb reverse tcp:8888 tcp:8888
      ```
+  2. En la app Android (diálogo del conector en la barra superior), configurar:
+     - **Endpoint:** `http://127.0.0.1:8888`
+     - **Token (`X-Auth-Token`):** el mismo valor de `HONEYGATE_API_TOKEN` que usa el daemon.
+
+---
+
+## 🛡️ Límites Conocidos
+
+1. **Sin control real de red del router:** Como corre sin `root`, HoneyGate no intercepta paquetes de terceros, no redirige WiFi, no corta acceso a internet en LAN y no aplica `dhcp_lease_sec` ni `bandwidth_kbps` (son valores sugeridos para orquestación externa).
+2. **Sin TLS nativo integrado:** La API administrativa, el portal cautivo y el puerto `8443` operan en HTTP plano sobre `127.0.0.1`. Para exponer en red local o internet se requiere un proxy inverso TLS (Nginx/Caddy) o túnel `adb reverse` / SSH.
+3. **Componentes parciales de `device_id`:** El portal cautivo mide en el navegador `user_agent`, `screen`, `timezone`, `language` y `canvas_hash`; los campos `ja3` y `dhcp_option_55` solo se incorporan si una sonda externa o router los envía, quedando vacíos cuando no están disponibles.
+4. **Dependencia de kernel Linux:** `select.epoll` e `inotify` vía `libc.so.6` requieren Linux o WSL2 (no funciona de forma nativa en Windows ni macOS sin contenedor Linux).
+5. **Modo DEMO en la app Android:** Está desactivado por defecto y su única finalidad es probar flujos locales en el teléfono cuando no hay un daemon conectado; al desactivarlo elimina los registros marcados `isDemo=true`.
+
+---
+
+## ⚖️ Marco Legal y Privacidad (República Argentina)
+
+- **Ley 26.388 (Delitos Informáticos):** HoneyGate debe desplegarse únicamente en redes propias o infraestructuras donde exista autorización expresa y documentada del titular. Los servicios emulados nunca ejecutan comandos reales ni abren conexiones salientes.
+- **Ley 25.326 (Protección de Datos Personales):**
+  - El portal cautivo solicita consentimiento informado explícito, solo recolecta correo de contacto y metadatos técnicos mínimos, y **nunca** solicita ni almacena contraseñas de usuarios.
+  - Los honeytokens deben contener exclusivamente identificadores ficticios (el daemon rechaza dominios reales conocidos).
+  - Los correos en `otp_challenges` y `portal_registrations` se protegen con HMAC-SHA256 (`HONEYGATE_PORTAL_SECRET`).
+  - Los informes (`GET /api/report` en JSON, CSV y Markdown) enmascaran correos por defecto (`j***@dominio`) salvo solicitud explícita (`include_full_email=1`).
+  - La retención configurable (`POST /api/privacy/retention-purge`) y el borrado por visitante (`POST /api/privacy/forget-visitor`) exigen confirmación explícita, eliminan sesiones, eventos, registros y desafíos OTP asociados, y registran un evento de auditoría sin PII.
 
 ---
 
 ## 📁 Estructura del Repositorio
 
 ```text
-├── honeygate/                 # Núcleo de red y decepción en Python
-│   ├── __init__.py            # Inicializador de paquete
-│   ├── honeywall_core.py      # Bucle epoll Edge-Triggered, Honeywall y Rate Limiter
-│   ├── cli_console.py         # Consola táctica interactiva con autocompletado en tiempo real
-│   ├── forensic_monitor.py    # Monitor inotify de bajo nivel (ctypes) y notificaciones
-│   └── dashboard_api.py       # API REST segura (127.0.0.1) y Dashboard web HTML5
-├── modules/                   # Módulos de auditoría y pruebas de pivoteo
-├── logs/                      # Directorio de bitácoras de seguridad
-├── app/                       # Aplicación Android (Jetpack Compose & Room Database)
-│   ├── src/main/java/com/example/
-│   │   ├── data/local/        # Entidades Room (ForensicEvent, MonitoredSession, HoneygateConfig)
-│   │   ├── data/remote/       # Cliente REST HoneyGateDaemonClient (X-Auth-Token)
-│   │   ├── data/repository/   # Lógica de invariantes, Anti-Sybil y correlación
-│   │   ├── ui/components/     # Insignia y diálogo de control del Daemon Linux
-│   │   ├── ui/screens/        # Pantallas: LazyColumn forense, Honeygate 3 Modos, Sesiones, Blue Team Report
-│   │   └── ui/theme/          # Sistema de diseño Eye-Care M3
-├── REGLAS_DEL_PROYECTO.md     # Normas fundamentales y directrices de desarrollo
-├── run_framework.py           # Lanzador unificado del backend defensivo
-├── test_honeygate.py          # Batería de pruebas automatizadas de integración y seguridad
-└── requirements.txt           # Dependencias Python
+├── honeygate/
+│   ├── __init__.py
+│   ├── cli_console.py         # Consola interactiva non-blocking y auditoría /proc/net
+│   ├── dashboard_api.py       # API REST autenticada (127.0.0.1:8888) y panel HTML5
+│   ├── deception.py           # Perfil único Debian 12, MySQL HandshakeV10 binario y respuestas fijas
+│   ├── forensic_monitor.py    # Vigilancia inotify de bajo nivel (libc.so.6 vía ctypes)
+│   ├── honeywall_core.py      # Bucle epoll Edge-Triggered, rate-limiter y shutdown(SHUT_RDWR)
+│   ├── mitre.py               # Cargador y validador de reglas MITRE ATT&CK
+│   ├── mitre_rules.json       # Mapeo externo editable de técnicas MITRE ATT&CK
+│   ├── portal.py              # Portal cautivo Modo 1 (127.0.0.1:8090), OTP, Anti-Sybil y CSP
+│   ├── reporting.py           # Generación de informes JSON/CSV/Markdown con sanitización y masking
+│   └── storage.py             # Persistencia única en SQLite y purgas de privacidad
+├── deploy/systemd/
+│   └── honeygate.service      # Unidad systemd de usuario endurecida
+├── .github/workflows/
+│   └── tests.yml              # CI de solo lectura (python3 test_honeygate.py)
+├── modules/                   # Scripts auxiliares de laboratorio
+├── app/                       # App Android (Jetpack Compose + Room + Robolectric)
+├── data/                      # Base SQLite y secreto HMAC en runtime (fuera de git)
+├── logs/                      # Bitácoras locales en runtime (fuera de git)
+├── .env.example               # Variables de entorno documentadas con valores vacíos
+├── run_framework.py           # Lanzador principal (CLI interactiva o headless)
+└── test_honeygate.py          # Pruebas automáticas de integración y seguridad
 ```
-
----
-
-## 🚀 Guía de Inicio Rápido
-
-### 1. Ejecución del Backend en Kali Linux o WSL2
-
-```bash
-# Instalar dependencias opcionales
-pip install -r requirements.txt
-
-# Ejecutar las pruebas automatizadas del motor defensivo y seguridad
-python3 test_honeygate.py
-
-# (Opcional) Definir un token propio para el daemon; si se omite, se genera uno efímero por arranque
-export HONEYGATE_API_TOKEN="tu_token_seguro"
-
-# Iniciar el framework completo (CLI interactiva + Servidor Web en 127.0.0.1:8888)
-python3 run_framework.py
-```
-
-* **Consola Interactiva**: Disponible de inmediato en la terminal con comandos `status`, `honeywall-stats`, `isolate <ip>`, `unblock <ip>`.
-* **API y Dashboard**: Accesible localmente en `http://127.0.0.1:8888`. Para conectar un teléfono físico vía USB, ejecutá `adb reverse tcp:8888 tcp:8888` y apuntá la app a `http://127.0.0.1:8888` con el token configurado.
-
-### 2. Ejecución y Compilación de la Aplicación Android
-
-La aplicación Android está configurada con Gradle (Kotlin DSL) y Jetpack Compose:
-
-```bash
-# Compilar la aplicación y verificar la base de datos Room
-gradle assembleDebug
-
-# Ejecutar pruebas unitarias locales
-gradle :app:testDebugUnitTest
-```
-
----
-
-## 🔄 Procedimiento de Rollback y Control de Versiones
-
-Para revertir cambios ante incidencias, se incluye el script `rollback.sh` que exige especificar explícitamente el commit o etiqueta destino (realizando respaldo automático con `git stash` si hay cambios pendientes):
-
-```bash
-# Consultar historial reciente para elegir el destino
-git log --oneline -n 5
-
-# Restaurar archivos al commit o tag indicado (argumento obligatorio)
-./rollback.sh <COMMIT_HASH_O_TAG>
-
-# Restaurar forzando descarte de cambios locales
-./rollback.sh --hard <COMMIT_HASH_O_TAG>
-```
-
----
-
-## ⚖️ Marco Legal y Ética Operacional
-
-Este software ha sido diseñado exclusivamente para auditorías de seguridad autorizadas, entornos de laboratorio, investigación forense y defensa perimetral corporativa.
-* **Ley 25.326 (República Argentina)**: Garantiza la protección integral de datos personales almacenados en archivos o bancos de datos.
-* **Ley 26.388 (República Argentina)**: Tipifica los delitos informáticos y sanciona el acceso no autorizado a sistemas informáticos.
-
-El uso de **HoneyGate** debe realizarse siempre en infraestructuras propias o con autorización explícita y por escrito de sus propietarios.

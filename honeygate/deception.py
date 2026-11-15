@@ -120,7 +120,7 @@ RE_FORBIDDEN_TEMPLATE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Tabla fija de respuestas de shell simulado (sin ejecución ni reflejo de entrada arbitraria)
+# Tabla fija de respuestas de shell emulado (sin ejecución ni reflejo de entrada arbitraria)
 FIXED_SHELL_RESPONSES: Dict[str, bytes] = {
     "id": b"uid=1001(guest) gid=1001(guest) groups=1001(guest)\r\n",
     "whoami": b"guest\r\n",

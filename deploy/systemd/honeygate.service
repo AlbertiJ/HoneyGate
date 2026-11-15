@@ -1,0 +1,29 @@
+[Unit]
+Description=HoneyGate Non-Root Deception & Telemetry Daemon
+Documentation=https://github.com/AlbertiJ/HoneyGate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ajustar WorkingDirectory, EnvironmentFile, ExecStart y ReadWritePaths a la ruta real del repositorio
+WorkingDirectory=%h/HoneyGate
+EnvironmentFile=-%h/HoneyGate/.env
+Environment=HONEYGATE_HEADLESS=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/HoneyGate/run_framework.py
+Restart=on-failure
+RestartSec=5
+
+# Endurecimiento de seguridad (unidad de usuario)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/HoneyGate/data %h/HoneyGate/logs
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

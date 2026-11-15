@@ -309,7 +309,7 @@ def _send_otp_via_smtp(recipient_email: str, otp_code: str) -> Tuple[bool, str]:
         return False, "SMTP no configurado"
 
     try:
-        smtp_port = int(os.environ.get("HONEYGATE_SMTP_PORT", "587").strip())
+        smtp_port = int((os.environ.get("HONEYGATE_SMTP_PORT") or "").strip() or "587")
     except ValueError:
         return False, "HONEYGATE_SMTP_PORT inválido"
 

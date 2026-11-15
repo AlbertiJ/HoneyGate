@@ -7,7 +7,6 @@ Llamadas Nativas al Kernel de Linux vía ctypes | Expresiones Regulares | notify
 
 import os
 import re
-import sys
 import json
 import time
 import ctypes
@@ -16,7 +15,7 @@ import struct
 import logging
 import threading
 import subprocess
-from typing import List, Tuple, Dict, Any, Optional, Callable
+from typing import List, Tuple, Dict, Any, Optional
 
 from honeygate.mitre import get_mitre_engine
 

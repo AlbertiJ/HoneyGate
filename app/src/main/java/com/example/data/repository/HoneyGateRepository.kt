@@ -42,11 +42,7 @@ class HoneyGateRepository(
   val allSessions: Flow<List<MonitoredSessionEntity>> = sessionDao.getAllSessions()
   val honeygateConfig: Flow<HoneygateConfigEntity?> = configDao.getConfig()
 
-  suspend fun insertEvent(event: ForensicEvent) = eventDao.insertEvent(event)
-
   suspend fun deleteEvent(id: Long) = eventDao.deleteEventById(id)
-
-  suspend fun clearAllEvents() = eventDao.clearAll()
 
   suspend fun saveHoneygateConfig(config: HoneygateConfigEntity) = configDao.saveConfig(config)
 

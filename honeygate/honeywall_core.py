@@ -887,7 +887,7 @@ class EpollNetworkEngine:
     def _handle_client_read(self, client_fd: int):
         """
         Lee datos del cliente hasta vaciar el buffer (EAGAIN) en modo Edge-Triggered.
-        Procesa comandos simulados con límites estrictos y sin ejecución ni egresos.
+        Procesa comandos en servicios emulados con límites estrictos y sin ejecución ni egresos.
         """
         session = self.honeywall.sessions_by_fd.get(client_fd)
         if not session:
@@ -945,12 +945,6 @@ class EpollNetworkEngine:
         except OSError:
             pass
         self.honeywall.terminate_session(client_fd, reason)
-
-    @staticmethod
-    def _generate_deception_response(session: ConnectionSession, raw_data: bytes) -> bytes:
-        """Compatibilidad estática: delega a la tabla fija sin ejecución ni egresos."""
-        resp, _ = EmulatedServiceEngine.evaluate_input(session.service, raw_data, honeytokens=None)
-        return resp
 
     def start_background(self) -> threading.Thread:
         """Inicia el motor de red en un hilo separado de forma asíncrona."""

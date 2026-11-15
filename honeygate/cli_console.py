@@ -54,7 +54,7 @@ class HoneyGateDynamicCompleter(Completer):
         self.mgmt_commands = {
             "status": "Muestra estado del motor epoll y métricas en tiempo real",
             "honeywall-stats": "Despliega estadísticas del Honeywall y umbral de contención",
-            "connections": "Lista todas las sesiones activas en puertos simulados con MAC/IP",
+            "connections": "Lista todas las sesiones activas en puertos emulados con MAC/IP",
             "isolate": "Aísla perimetralmente una dirección IP expulsando sus conexiones",
             "unblock": "Remueve una IP de la lista negra de contención",
             "audit": "Ejecuta auditoría de red de espacio de usuario (/proc/net/tcp, /proc/net/arp)",

@@ -841,18 +841,6 @@ class HoneyGateStorage:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def count_recent_distinct_emails_for_device(self, device_id: str, since_ts: float) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT COUNT(DISTINCT email_hash) AS cnt
-                FROM portal_registrations
-                WHERE device_id = ? AND created_at >= ?
-                """,
-                (device_id, float(since_ts)),
-            ).fetchone()
-            return int(row["cnt"]) if row else 0
-
     def list_recent_email_hashes_for_device(self, device_id: str, since_ts: float) -> List[str]:
         with self._lock:
             rows = self._conn.execute(

@@ -149,7 +149,7 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <div class="dashboard-main">
         <div class="panel">
             <h2>
-                <span>Sesiones Activas en Puertos Simulados</span>
+                <span>Sesiones Activas en Puertos Emulados</span>
                 <span style="font-size: 12px; color: var(--text-muted);">Auto-refresh 2s</span>
             </h2>
             <table>

@@ -8,9 +8,9 @@ Lanzador Principal Integrado (Epoll Core + Honeywall + CLI + inotify + Web API)
 
 import os
 import sys
-import time
 import signal
 import logging
+import threading
 
 from honeygate.honeywall_core import HoneyGateHoneywall, EpollNetworkEngine
 from honeygate.cli_console import InteractiveCLI
@@ -21,6 +21,15 @@ from honeygate.storage import HoneyGateStorage
 from honeygate.mitre import get_mitre_engine
 
 logger = logging.getLogger("HoneyGateMain")
+
+
+def _is_headless_mode() -> bool:
+    env_val = os.environ.get("HONEYGATE_HEADLESS", "").strip().lower()
+    if env_val in ("1", "true", "yes", "on"):
+        return True
+    if env_val in ("0", "false", "no", "off"):
+        return False
+    return not sys.stdin.isatty()
 
 
 def main():
@@ -48,20 +57,20 @@ def main():
     honeywall = HoneyGateHoneywall(alert_callback=on_honeywall_alert, storage=storage)
 
     # 2. Inicializar Motor de Sockets epoll en Puertos Altos (>1024) en 127.0.0.1 por defecto
-    # 2222 (SSH), 2323 (Telnet), 8080 (HTTP), 8443 (HTTPS), 3306 (MySQL)
+    # 2222 (SSH), 2323 (Telnet), 8080 (HTTP), 8443 (HTTPS-emulado), 3306 (MySQL)
     epoll_host = os.environ.get("HONEYGATE_EPOLL_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    simulation_ports = [2222, 2323, 8080, 8443, 3306]
-    epoll_engine = EpollNetworkEngine(ports=simulation_ports, honeywall=honeywall, host=epoll_host)
+    deception_ports = [2222, 2323, 8080, 8443, 3306]
+    epoll_engine = EpollNetworkEngine(ports=deception_ports, honeywall=honeywall, host=epoll_host)
     epoll_engine.start_background()
 
-    # 3. Inicializar Monitor Forense inotify para logs locales y cowrie.json
-    log_targets = ["logs/honeywall.log", "logs/cowrie.json", "cowrie.json"]
+    # 3. Inicializar Monitor Forense inotify para logs locales
+    log_targets = ["logs/honeywall.log"]
     forensics = ForensicAlertManager(target_log_files=log_targets, storage=storage)
     forensics.start_background()
 
     # 4. Inicializar Servidor Web y API de Telemetría Asíncrona (127.0.0.1 seguro por defecto)
     api_host = os.environ.get("HONEYGATE_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    api_port = int(os.environ.get("HONEYGATE_API_PORT", "8888"))
+    api_port = int((os.environ.get("HONEYGATE_API_PORT") or "").strip() or "8888")
     web_api = AsyncDashboardServer(
         honeywall=honeywall,
         forensics=forensics,
@@ -73,7 +82,7 @@ def main():
 
     # 4b. Portal Cautivo Modo 1 en puerto independiente (sin acceso a token ni /api/*)
     portal_host = os.environ.get("HONEYGATE_PORTAL_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    portal_port = int(os.environ.get("HONEYGATE_PORTAL_PORT", "8090"))
+    portal_port = int((os.environ.get("HONEYGATE_PORTAL_PORT") or "").strip() or "8090")
     if portal_port == api_port:
         raise ValueError("El puerto del portal cautivo debe ser distinto al del panel de administración")
     portal_server = AsyncPortalServer(
@@ -84,29 +93,52 @@ def main():
     )
     portal_server.start_background()
 
+    stop_event = threading.Event()
+    shutdown_lock = threading.Lock()
+    cleaned_up = False
+
+    def cleanup_all():
+        nonlocal cleaned_up
+        with shutdown_lock:
+            if cleaned_up:
+                return
+            cleaned_up = True
+            stop_event.set()
+            epoll_engine.stop()
+            forensics.stop()
+            portal_server.stop()
+            web_api.stop()
+            storage.close()
+
     # Manejador de señales de terminación
     def handle_shutdown(signum, frame):
         print("\n\033[1;33m[*] Señal de detención recibida. Limpiando descriptores...\033[0m")
-        epoll_engine.stop()
-        forensics.stop()
-        portal_server.stop()
-        web_api.stop()
-        storage.close()
+        cleanup_all()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # 5. Iniciar Consola Interactiva Avanzada CLI en Hilo Secundario
-    cli = InteractiveCLI(honeywall=honeywall, epoll_engine=epoll_engine)
-    cli_thread = cli.start_in_background()
+    if _is_headless_mode():
+        logger.info("[MAIN] Ejecutando en modo servicio headless (sin TTY interactiva).")
+        try:
+            while not stop_event.is_set():
+                stop_event.wait(0.5)
+        except KeyboardInterrupt:
+            handle_shutdown(None, None)
+    else:
+        # 5. Iniciar Consola Interactiva Avanzada CLI en Hilo Secundario
+        cli = InteractiveCLI(honeywall=honeywall, epoll_engine=epoll_engine)
+        cli_thread = cli.start_in_background()
 
-    # Mantener el proceso principal activo esperando la finalización del hilo CLI
-    try:
-        while cli.is_running and cli_thread.is_alive():
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        handle_shutdown(None, None)
+        # Mantener el proceso principal activo esperando la finalización del hilo CLI
+        try:
+            while cli.is_running and cli_thread.is_alive() and not stop_event.is_set():
+                stop_event.wait(0.5)
+        except KeyboardInterrupt:
+            handle_shutdown(None, None)
+        finally:
+            cleanup_all()
 
     print("\033[1;32m[+] Framework HoneyGate finalizado correctamente.\033[0m")
 
