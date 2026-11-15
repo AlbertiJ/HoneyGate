@@ -113,6 +113,8 @@ class ExampleRobolectricTest {
               "status": "en_observacion",
               "bytes_in": 120,
               "bytes_out": 80,
+              "dhcp_lease_sec": 60,
+              "bandwidth_kbps": 256,
               "observed_reason": "Prueba"
             },
             "visitor_label": null
@@ -128,10 +130,14 @@ class ExampleRobolectricTest {
     val sessDto = sessPage.sessions[0]
     assertEquals(42L, sessDto.id)
     assertEquals("en_observacion", sessDto.status)
+    assertEquals(60, sessDto.dhcpLeaseSec)
+    assertEquals(256, sessDto.bandwidthKbps)
     assertNull(sessDto.honeytokenTouched)
     assertNull(sessDto.visitorLabel)
     val sessEntity = HoneyGateRepository.mapSessionDtoToEntity(sessDto)
     assertEquals(42L, sessEntity.daemonSessionId)
+    assertEquals(60, sessEntity.dhcpLeaseSec)
+    assertEquals(256, sessEntity.bandwidthKbps)
     assertTrue(sessEntity.isInObservation)
     assertEquals("", sessEntity.visitorLabel)
 

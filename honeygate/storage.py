@@ -9,6 +9,8 @@ Todas las consultas utilizan parámetros vinculados (?) para prevenir SQL inject
 import os
 import json
 import time
+import hashlib
+import hmac
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,6 +82,7 @@ class HoneyGateStorage:
                 client_port INTEGER NOT NULL DEFAULT 0,
                 device_type TEXT NOT NULL DEFAULT 'unknown',
                 browser_fingerprint TEXT NOT NULL DEFAULT '',
+                browser_hash TEXT NOT NULL DEFAULT '',
                 network_fingerprint TEXT NOT NULL DEFAULT '',
                 dhcp_fingerprint TEXT NOT NULL DEFAULT '',
                 dest_ip TEXT NOT NULL DEFAULT '0.0.0.0',
@@ -93,6 +96,8 @@ class HoneyGateStorage:
                 duration_sec REAL NOT NULL DEFAULT 0.0,
                 bytes_in INTEGER NOT NULL DEFAULT 0,
                 bytes_out INTEGER NOT NULL DEFAULT 0,
+                dhcp_lease_sec INTEGER NOT NULL DEFAULT 300,
+                bandwidth_kbps INTEGER NOT NULL DEFAULT 10240,
                 status TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'closed', 'isolated', 'en_observacion')),
                 observed_reason TEXT NOT NULL DEFAULT ''
@@ -131,8 +136,57 @@ class HoneyGateStorage:
                 reason TEXT NOT NULL,
                 isolated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS portal_registrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                created_at REAL NOT NULL,
+                device_id TEXT NOT NULL,
+                browser_hash TEXT NOT NULL DEFAULT '',
+                mac TEXT NOT NULL DEFAULT 'UNKNOWN',
+                ip TEXT NOT NULL,
+                email_hash TEXT NOT NULL,
+                email_domain TEXT NOT NULL DEFAULT '',
+                consent_accepted INTEGER NOT NULL DEFAULT 0,
+                otp_verified INTEGER NOT NULL DEFAULT 0,
+                observed INTEGER NOT NULL DEFAULT 0,
+                observed_reason TEXT NOT NULL DEFAULT '',
+                dhcp_lease_sec INTEGER NOT NULL DEFAULT 300,
+                bandwidth_kbps INTEGER NOT NULL DEFAULT 10240,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_portal_reg_device_time ON portal_registrations(device_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_portal_reg_bhash_time ON portal_registrations(browser_hash, created_at);
+            CREATE INDEX IF NOT EXISTS idx_portal_reg_ip_time ON portal_registrations(ip, created_at);
+
+            CREATE TABLE IF NOT EXISTS otp_challenges (
+                challenge_id TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                device_id TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                email_hash TEXT NOT NULL,
+                otp_salt TEXT NOT NULL,
+                otp_hash TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                verified INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
+
+        # Migración segura si existe una base SQLite creada antes de Fase 3
+        existing_cols = {
+            row["name"]
+            for row in cur.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "browser_hash" not in existing_cols:
+            cur.execute("ALTER TABLE sessions ADD COLUMN browser_hash TEXT NOT NULL DEFAULT ''")
+        if "dhcp_lease_sec" not in existing_cols:
+            cur.execute("ALTER TABLE sessions ADD COLUMN dhcp_lease_sec INTEGER NOT NULL DEFAULT 300")
+        if "bandwidth_kbps" not in existing_cols:
+            cur.execute("ALTER TABLE sessions ADD COLUMN bandwidth_kbps INTEGER NOT NULL DEFAULT 10240")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_browser_hash ON sessions(browser_hash)")
 
         row = cur.execute("SELECT id FROM daemon_config WHERE id = 1").fetchone()
         if row is None:
@@ -275,6 +329,8 @@ class HoneyGateStorage:
                 "status": row["status"],
                 "bytes_in": int(row["bytes_in"]),
                 "bytes_out": int(row["bytes_out"]),
+                "dhcp_lease_sec": int(row["dhcp_lease_sec"]),
+                "bandwidth_kbps": int(row["bandwidth_kbps"]),
                 "observed_reason": row["observed_reason"] or None,
             },
             "device_id": row["device_id"],
@@ -296,6 +352,7 @@ class HoneyGateStorage:
         device_id: str = "",
         device_type: str = "unknown",
         browser_fingerprint: str = "",
+        browser_hash: str = "",
         network_fingerprint: str = "",
         dhcp_fingerprint: str = "",
         dest_ip: str = "0.0.0.0",
@@ -306,6 +363,9 @@ class HoneyGateStorage:
         fd: Optional[int] = None,
         mode: Optional[int] = None,
         status: str = "active",
+        dhcp_lease_sec: int = 300,
+        bandwidth_kbps: int = 10240,
+        observed_reason: str = "",
     ) -> int:
         """Inserta una nueva sesión en el esquema unificado y retorna su ID."""
         if status not in VALID_SESSION_STATUSES:
@@ -319,11 +379,11 @@ class HoneyGateStorage:
                 """
                 INSERT INTO sessions (
                     mode, device_id, mac, ip, client_port, device_type,
-                    browser_fingerprint, network_fingerprint, dhcp_fingerprint,
+                    browser_fingerprint, browser_hash, network_fingerprint, dhcp_fingerprint,
                     dest_ip, dest_port, service, honeytoken_touched, visitor_label,
                     fd, started_at, ended_at, duration_sec, bytes_in, bytes_out,
-                    status, observed_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0.0, 0, 0, ?, '')
+                    dhcp_lease_sec, bandwidth_kbps, status, observed_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0.0, 0, 0, ?, ?, ?, ?)
                 """,
                 (
                     effective_mode,
@@ -333,6 +393,7 @@ class HoneyGateStorage:
                     int(client_port),
                     device_type,
                     browser_fingerprint,
+                    browser_hash,
                     network_fingerprint,
                     dhcp_fingerprint,
                     dest_ip,
@@ -342,7 +403,10 @@ class HoneyGateStorage:
                     visitor_label,
                     fd,
                     now,
+                    int(dhcp_lease_sec),
+                    int(bandwidth_kbps),
                     status,
+                    observed_reason,
                 ),
             )
             self._conn.commit()
@@ -646,3 +710,196 @@ class HoneyGateStorage:
                 r["ip"]: {"isolated_at": float(r["isolated_at"]), "reason": r["reason"]}
                 for r in rows
             }
+
+    # ------------------------------------------------------------------
+    # Portal Cautivo (Modo 1) — Anti-Sybil y Desafíos OTP (sin secrets en claro)
+    # ------------------------------------------------------------------
+
+    def record_portal_registration(
+        self,
+        session_id: Optional[int],
+        device_id: str,
+        browser_hash: str,
+        mac: str,
+        ip: str,
+        email_hash: str,
+        email_domain: str,
+        consent_accepted: bool,
+        otp_verified: bool,
+        observed: bool,
+        observed_reason: str,
+        dhcp_lease_sec: int,
+        bandwidth_kbps: int,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO portal_registrations (
+                    session_id, created_at, device_id, browser_hash, mac, ip,
+                    email_hash, email_domain, consent_accepted, otp_verified,
+                    observed, observed_reason, dhcp_lease_sec, bandwidth_kbps
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    time.time(),
+                    device_id,
+                    browser_hash or "",
+                    mac,
+                    ip,
+                    email_hash,
+                    email_domain,
+                    1 if consent_accepted else 0,
+                    1 if otp_verified else 0,
+                    1 if observed else 0,
+                    observed_reason or "",
+                    int(dhcp_lease_sec),
+                    int(bandwidth_kbps),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def count_recent_distinct_emails_for_device(self, device_id: str, since_ts: float) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(DISTINCT email_hash) AS cnt
+                FROM portal_registrations
+                WHERE device_id = ? AND created_at >= ?
+                """,
+                (device_id, float(since_ts)),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    def list_recent_email_hashes_for_device(self, device_id: str, since_ts: float) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT email_hash
+                FROM portal_registrations
+                WHERE device_id = ? AND created_at >= ?
+                """,
+                (device_id, float(since_ts)),
+            ).fetchall()
+            return [str(r["email_hash"]) for r in rows]
+
+    def count_recent_registrations_for_ip(self, ip: str, since_ts: float) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM portal_registrations
+                WHERE ip = ? AND created_at >= ?
+                """,
+                (ip, float(since_ts)),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    def find_mac_rotation(self, browser_hash: str, current_mac: str, since_ts: float) -> Optional[str]:
+        if not browser_hash:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mac
+                FROM portal_registrations
+                WHERE browser_hash = ? AND created_at >= ? AND mac != ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (browser_hash, float(since_ts), current_mac),
+            ).fetchone()
+            if row:
+                return str(row["mac"])
+            row_sess = self._conn.execute(
+                """
+                SELECT mac
+                FROM sessions
+                WHERE browser_hash = ? AND started_at >= ? AND mac != ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (browser_hash, float(since_ts), current_mac),
+            ).fetchone()
+            return str(row_sess["mac"]) if row_sess else None
+
+    def create_otp_challenge(
+        self,
+        challenge_id: str,
+        device_id: str,
+        ip: str,
+        email_hash: str,
+        otp_salt: str,
+        otp_hash: str,
+        ttl_sec: int = 300,
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO otp_challenges (
+                    challenge_id, created_at, expires_at, device_id, ip,
+                    email_hash, otp_salt, otp_hash, attempts, verified
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                """,
+                (
+                    challenge_id,
+                    now,
+                    now + float(ttl_sec),
+                    device_id,
+                    ip,
+                    email_hash,
+                    otp_salt,
+                    otp_hash,
+                ),
+            )
+            self._conn.commit()
+
+    def verify_otp_challenge(
+        self,
+        challenge_id: str,
+        email_hash: str,
+        otp_code: str,
+        max_attempts: int = 5,
+    ) -> Tuple[bool, str]:
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM otp_challenges WHERE challenge_id = ?",
+                (challenge_id,),
+            ).fetchone()
+            if not row:
+                return False, "Desafío OTP inexistente"
+            if int(row["verified"]) == 1:
+                return False, "El desafío OTP ya fue utilizado"
+            if now > float(row["expires_at"]):
+                return False, "El código OTP expiró"
+            if int(row["attempts"]) >= int(max_attempts):
+                return False, "Demasiados intentos fallidos de OTP"
+            if not hmac.compare_digest(str(row["email_hash"]), str(email_hash)):
+                self._conn.execute(
+                    "UPDATE otp_challenges SET attempts = attempts + 1 WHERE challenge_id = ?",
+                    (challenge_id,),
+                )
+                self._conn.commit()
+                return False, "Correo no coincide con el desafío OTP"
+
+            expected_hash = str(row["otp_hash"])
+            candidate_hash = hashlib.sha256(
+                f"{row['otp_salt']}:{otp_code}".encode("utf-8")
+            ).hexdigest()
+            if not hmac.compare_digest(candidate_hash, expected_hash):
+                self._conn.execute(
+                    "UPDATE otp_challenges SET attempts = attempts + 1 WHERE challenge_id = ?",
+                    (challenge_id,),
+                )
+                self._conn.commit()
+                return False, "Código OTP incorrecto"
+
+            self._conn.execute(
+                "UPDATE otp_challenges SET verified = 1, attempts = attempts + 1 WHERE challenge_id = ?",
+                (challenge_id,),
+            )
+            self._conn.commit()
+            return True, "OK"

@@ -417,6 +417,14 @@ fun SessionItemCard(
           Text("Detalle real (/api/sessions):", fontSize = 10.sp, color = CyberCyan, fontWeight = FontWeight.Bold)
           Text("• mode: ${session.mode} | device_type: ${session.deviceType.ifBlank { "—" }}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
           Text("• duration_sec: ${session.durationSeconds}s | bytes_in: ${session.bytesIn} | bytes_out: ${session.bytesOut}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
+          if (session.dhcpLeaseSec != null || session.bandwidthKbps != null) {
+            Text(
+              "• dhcp_lease_sec: ${session.dhcpLeaseSec ?: "—"}s | bandwidth_kbps: ${session.bandwidthKbps ?: "—"} kbps",
+              fontSize = 9.sp,
+              color = TextSecondary,
+              fontFamily = FontFamily.Monospace
+            )
+          }
           if (session.browserFingerprint.isNotBlank()) {
             Text("• fingerprints.browser: ${session.browserFingerprint}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
           }

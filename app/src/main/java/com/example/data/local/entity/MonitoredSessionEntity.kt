@@ -31,6 +31,8 @@ data class MonitoredSessionEntity(
   val durationSeconds: Long = 0L,
   val bytesIn: Long = 0L,
   val bytesOut: Long = 0L,
+  val dhcpLeaseSec: Int? = null,
+  val bandwidthKbps: Int? = null,
   val visitorLabel: String = "",
   val observedReason: String = "",
   val isMacBlocked: Boolean = false,

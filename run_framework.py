@@ -16,6 +16,7 @@ from honeygate.honeywall_core import HoneyGateHoneywall, EpollNetworkEngine
 from honeygate.cli_console import InteractiveCLI
 from honeygate.forensic_monitor import ForensicAlertManager, DesktopNotificationDispatcher
 from honeygate.dashboard_api import AsyncDashboardServer
+from honeygate.portal import AsyncPortalServer
 from honeygate.storage import HoneyGateStorage
 
 logger = logging.getLogger("HoneyGateMain")
@@ -50,20 +51,36 @@ def main():
     forensics.start_background()
 
     # 4. Inicializar Servidor Web y API de Telemetría Asíncrona (127.0.0.1 seguro por defecto)
+    api_host = os.environ.get("HONEYGATE_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    api_port = int(os.environ.get("HONEYGATE_API_PORT", "8888"))
     web_api = AsyncDashboardServer(
         honeywall=honeywall,
         forensics=forensics,
-        host="127.0.0.1",
-        port=8888,
+        host=api_host,
+        port=api_port,
         storage=storage,
     )
     web_api.start_background()
+
+    # 4b. Portal Cautivo Modo 1 en puerto independiente (sin acceso a token ni /api/*)
+    portal_host = os.environ.get("HONEYGATE_PORTAL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    portal_port = int(os.environ.get("HONEYGATE_PORTAL_PORT", "8090"))
+    if portal_port == api_port:
+        raise ValueError("El puerto del portal cautivo debe ser distinto al del panel de administración")
+    portal_server = AsyncPortalServer(
+        storage=storage,
+        host=portal_host,
+        port=portal_port,
+        alert_callback=on_honeywall_alert,
+    )
+    portal_server.start_background()
 
     # Manejador de señales de terminación
     def handle_shutdown(signum, frame):
         print("\n\033[1;33m[*] Señal de detención recibida. Limpiando descriptores...\033[0m")
         epoll_engine.stop()
         forensics.stop()
+        portal_server.stop()
         web_api.stop()
         storage.close()
         sys.exit(0)

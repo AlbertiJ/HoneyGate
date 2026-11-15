@@ -164,6 +164,25 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                 </tbody>
             </table>
 
+            <h2 style="margin-top: 28px; color: var(--accent-cyan);">
+                <span>Sesiones Registradas & Portal (/api/sessions)</span>
+            </h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Origen (IP / MAC)</th>
+                        <th>Device ID</th>
+                        <th>Etiqueta / Servicio</th>
+                        <th>Lease</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody id="portal-sessions-table-body">
+                    <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Sin sesiones sincronizadas.</td></tr>
+                </tbody>
+            </table>
+
             <h2 style="margin-top: 28px; color: var(--accent-red);">
                 <span>IPs en Lista de Aislamiento Activo</span>
             </h2>
@@ -196,12 +215,15 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     <script>
         const AUTH_TOKEN = "HONEYGATE_AUTH_TOKEN_VALUE";
 
-        // Función de escape estricto contra ataques XSS
+        // Función de escape estricto contra ataques XSS (incluye comillas en atributos)
         function escapeHtml(str) {
             if (str === null || str === undefined) return '';
-            const div = document.createElement('div');
-            div.textContent = String(str);
-            return div.innerHTML;
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         async function fetchMetrics() {
@@ -274,6 +296,43 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                         tr.querySelector('.btn-unblock').addEventListener('click', () => unblockIP(ip));
                         isoBody.appendChild(tr);
                     });
+                }
+
+                // Render sesiones unificadas (/api/sessions) estrictamente escapadas (Anti-XSS)
+                const sessRes = await fetch('/api/sessions?limit=25&offset=0', {
+                    headers: { 'X-Auth-Token': AUTH_TOKEN }
+                });
+                const psBody = document.getElementById('portal-sessions-table-body');
+                if (psBody && sessRes.ok) {
+                    const sessPage = await sessRes.json();
+                    psBody.innerHTML = '';
+                    const items = sessPage.sessions || [];
+                    if (items.length === 0) {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = '<td colspan="6" style="text-align: center; color: #64748b; padding: 12px;">Sin sesiones registradas en SQLite.</td>';
+                        psBody.appendChild(tr);
+                    } else {
+                        items.forEach(item => {
+                            const tr = document.createElement('tr');
+                            const origin = item.origin || {};
+                            const target = item.target || {};
+                            const sess = item.session || {};
+                            const st = String(sess.status || item.status || 'active');
+                            const badgeCls = st === 'isolated' ? 'crit' : (st === 'en_observacion' ? 'warn' : 'safe');
+                            const leaseTxt = sess.dhcp_lease_sec ? (escapeHtml(sess.dhcp_lease_sec) + 's') : '—';
+                            const labelTxt = item.visitor_label ? escapeHtml(item.visitor_label) : escapeHtml(target.service || '—');
+                            const reasonTxt = sess.observed_reason ? ('<div style="font-size:10px;color:#ffcc00;">' + escapeHtml(sess.observed_reason) + '</div>') : '';
+                            tr.innerHTML = `
+                                <td>#${escapeHtml(item.id)}</td>
+                                <td><strong>${escapeHtml(origin.ip || '')}</strong><br><code style="font-size:11px;">${escapeHtml(origin.mac || '')}</code></td>
+                                <td><code style="font-size:11px;">${escapeHtml(origin.device_id || '')}</code></td>
+                                <td>${labelTxt}${reasonTxt}</td>
+                                <td>${leaseTxt}</td>
+                                <td><span class="badge ${badgeCls}">${escapeHtml(st)}</span></td>
+                            `;
+                            psBody.appendChild(tr);
+                        });
+                    }
                 }
 
                 // Cargar alertas sanitizado (Anti-XSS con textContent)
