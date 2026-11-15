@@ -7,11 +7,15 @@ autenticación, validación de entrada, límite de tamaño y endurecimiento de s
 import io
 import os
 import re
+import hmac
+import stat
 import json
 import time
 import socket
+import hashlib
 import logging
 import smtplib
+import sqlite3
 import tempfile
 import urllib.request
 import urllib.error
@@ -353,9 +357,13 @@ def run_tests():
 
             prev_token_env = os.environ.pop("HONEYGATE_API_TOKEN", None)
             prev_lab_env = os.environ.pop("HONEYGATE_PORTAL_LAB_MODE", None)
+            prev_opt_env = os.environ.pop("HONEYGATE_PORTAL_OTP_OPTIONAL", None)
+            prev_secret_env = os.environ.pop("HONEYGATE_PORTAL_SECRET", None)
             prev_smtp_host = os.environ.pop("HONEYGATE_SMTP_HOST", None)
             prev_smtp_pass = os.environ.pop("HONEYGATE_SMTP_PASS", None)
             prev_smtp_user = os.environ.pop("HONEYGATE_SMTP_USER", None)
+
+            portal_secret_file = os.path.join(tmpdir, "portal_secret")
 
             # Mac resolver controlado para probar rotación de MAC con misma huella de navegador
             simulated_mac = {"val": "aa:bb:cc:11:22:33"}
@@ -371,6 +379,7 @@ def run_tests():
                 host="127.0.0.1",
                 port=38090,
                 mac_resolver=lambda _ip: simulated_mac["val"],
+                portal_secret_path=portal_secret_file,
             )
             p_admin.start_background()
             p_portal.start_background()
@@ -379,147 +388,42 @@ def run_tests():
             try:
                 p_auth_hdr = {"X-Auth-Token": p_admin.api_token}
 
-                # 11.1 Puerto separado, sin token de API, sin password input y /api/* bloqueado en portal
+                # 11.1 Puerto separado, sin token de API, sin password input, /api/* bloqueado y sin lease/bw sugerido
                 c_pget, _, portal_html = _http_request("http://127.0.0.1:38090/")
                 assert c_pget == 200
                 assert p_admin.api_token not in portal_html, "El portal NUNCA debe contener el token de la API"
                 assert "X-Auth-Token" not in portal_html
                 assert "/api/" not in portal_html, "El portal no puede llamar a /api/*"
                 assert 'type="password"' not in portal_html.lower(), "El portal nunca pide contraseña"
+                assert 'action="/portal/otp/request"' in portal_html, "OTP debe ser obligatorio por defecto"
+                assert "/portal/register" not in portal_html, "Registro sin OTP no debe exponerse por defecto"
                 assert "Ley 25.326" in portal_html and "Ley 26.388" in portal_html
 
                 for blocked_ep in ("/api/status", "/api/config", "/api/sessions", "/api/events"):
                     c_block, _, _ = _http_request(f"http://127.0.0.1:38090{blocked_ep}")
                     assert c_block == 404, f"Portal no debe exponer {blocked_ep}, retornó {c_block}"
 
-                # 11.2 Consentimiento obligatorio Ley 25.326
-                c_noconsent, _, _ = _http_request(
+                # 11.2 OTP obligatorio por defecto: /portal/register debe rechazarse con 403 sin HONEYGATE_PORTAL_OTP_OPTIONAL=1
+                c_reg_blocked, _, reg_blocked_body = _http_request(
                     "http://127.0.0.1:38090/portal/register",
+                    method="POST",
+                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                    body={"email": "bypass@empresa.org", "consent": True},
+                )
+                assert c_reg_blocked == 403, f"Sin HONEYGATE_PORTAL_OTP_OPTIONAL=1 debe retornar 403, retornó {c_reg_blocked}"
+                assert json.loads(reg_blocked_body)["otp_required"] is True
+
+                # Consentimiento obligatorio Ley 25.326 en /portal/otp/request
+                c_noconsent, _, _ = _http_request(
+                    "http://127.0.0.1:38090/portal/otp/request",
                     method="POST",
                     headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
                     body={"email": "sinconsent@empresa.org", "consent": False},
                 )
                 assert c_noconsent == 400
 
-                # 11.3 Registro válido y verificación de partes reales vs vacías de device_id
-                secret_visitor_email = "visitante.privado@empresa.org"
-                c_reg1, _, reg1_body = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
-                    body={
-                        "email": secret_visitor_email,
-                        "consent": True,
-                        "screen": "1080x2400x24",
-                        "timezone": "America/Argentina/Buenos_Aires",
-                        "language": "es-AR",
-                        "canvas_hash": "c1a2b3d4",
-                        "fonts_hash": "f9e8d7c6",
-                    },
-                )
-                assert c_reg1 == 200, f"Registro válido debe retornar 200, retornó {c_reg1}: {reg1_body}"
-                reg1 = json.loads(reg1_body)
-                assert reg1["accepted"] and reg1["status"] == "active"
-                assert reg1["dhcp_lease_sec"] == 300 and reg1["bandwidth_kbps"] == 10240
-
-                # Comprobar en /api/sessions del panel admin los fingerprints reales y vacíos
-                _, _, p_sess_body = _http_request(
-                    "http://127.0.0.1:38890/api/sessions?limit=10",
-                    headers=p_auth_hdr,
-                )
-                p_sess = json.loads(p_sess_body)["sessions"][0]
-                browser_fp = json.loads(p_sess["origin"]["fingerprints"]["browser"])
-                network_fp = json.loads(p_sess["origin"]["fingerprints"]["network"])
-                assert p_sess["origin"]["mac"] == "aa:bb:cc:11:22:33"
-                assert "Android" in browser_fp["user_agent"]
-                assert browser_fp["screen"] == "1080x2400x24"
-                assert "User-Agent" in network_fp["http_header_order"]
-                assert network_fp["ja3"] == "" and network_fp["ja4"] == "", "JA3/JA4 no medidos deben quedar vacíos"
-                assert p_sess["origin"]["fingerprints"]["dhcp"] == "", "DHCP Option 55 no medido debe quedar vacío"
-
-                # 11.4 Anti-Sybil: dominio temporal bloqueado (sin aislar IP)
-                c_disp, _, disp_body = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
-                    body={"email": "desechable@mailinator.com", "consent": True},
-                )
-                assert c_disp == 400
-                assert "127.0.0.1" not in p_honeywall.get_snapshot()["isolated_ips"]
-
-                # 11.5 Anti-Sybil: exceder sybil_max_emails_per_device (2) -> en_observacion con lease y bw reducidos
-                c_reg2, _, _ = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
-                    body={
-                        "email": "segundo.usuario@empresa.org",
-                        "consent": True,
-                        "screen": "1080x2400x24",
-                        "timezone": "America/Argentina/Buenos_Aires",
-                        "language": "es-AR",
-                        "canvas_hash": "c1a2b3d4",
-                        "fonts_hash": "f9e8d7c6",
-                    },
-                )
-                assert c_reg2 == 200
-                c_reg3, _, reg3_body = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
-                    body={
-                        "email": "tercero.sybil@empresa.org",
-                        "consent": True,
-                        "screen": "1080x2400x24",
-                        "timezone": "America/Argentina/Buenos_Aires",
-                        "language": "es-AR",
-                        "canvas_hash": "c1a2b3d4",
-                        "fonts_hash": "f9e8d7c6",
-                    },
-                )
-                assert c_reg3 == 200
-                reg3 = json.loads(reg3_body)
-                assert reg3["status"] == "en_observacion", f"Esperado en_observacion, obtuvo {reg3}"
-                assert reg3["dhcp_lease_sec"] == 60 and reg3["bandwidth_kbps"] == 256
-                assert "127.0.0.1" not in p_honeywall.get_snapshot()["isolated_ips"], "Anti-Sybil no debe bloquear de una"
-
-                # 11.6 Anti-Sybil: rotación de MAC con misma huella de navegador -> en_observacion
-                simulated_mac["val"] = "de:ad:be:ef:00:99"
-                c_rot, _, rot_body = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
-                    body={
-                        "email": "rotacion.mac@empresa.org",
-                        "consent": True,
-                        "screen": "1080x2400x24",
-                        "timezone": "America/Argentina/Buenos_Aires",
-                        "language": "es-AR",
-                        "canvas_hash": "c1a2b3d4",
-                        "fonts_hash": "f9e8d7c6",
-                    },
-                )
-                assert c_rot == 200
-                rot_json = json.loads(rot_body)
-                assert rot_json["status"] == "en_observacion"
-                assert "Rotación de MAC" in rot_json["observed_reason"]
-
-                # 11.7 Escape XSS en portal y en panel admin
-                xss_raw = '"><script>alert(1)</script>'
-                c_xss_portal, _, xss_portal_html = _http_request(
-                    "http://127.0.0.1:38090/portal/register",
-                    method="POST",
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    raw_body=f"email={urllib.parse.quote(xss_raw)}&consent=1".encode("utf-8"),
-                )
-                assert c_xss_portal == 400
-                assert "<script>alert(1)</script>" not in xss_portal_html
-                assert "&lt;script&gt;alert(1)&lt;/script&gt;" in xss_portal_html
-
-                _, _, dash_html = _http_request("http://127.0.0.1:38890/")
-                assert ".replace(/\"/g, '&quot;')" in dash_html and "escapeHtml(item.visitor_label)" in dash_html
-
-                # 11.8 OTP fail-closed sin SMTP ni modo lab, luego SMTP real mockeado y privacidad de logs
+                # 11.3 Fail-closed sin SMTP ni modo lab, luego registro completo vía OTP + SMTP,
+                # HMAC-SHA256 en otp_challenges (secreto 0600), verificación de device_id y ausencia de lease/bw en portal
                 c_otp_fail, _, _ = _http_request(
                     "http://127.0.0.1:38090/portal/otp/request",
                     method="POST",
@@ -528,7 +432,7 @@ def run_tests():
                 )
                 assert c_otp_fail == 503
 
-                # Probar SMTP usando solo variables de entorno y comprobar que clave/mail/OTP NO se guarden ni logueen
+                secret_visitor_email = "visitante.privado@empresa.org"
                 captured_smtp = {"password": None, "otp": None, "recipient": None}
                 smtp_secret_pw = "smtp_clave_ultra_secreta_987"
 
@@ -561,42 +465,121 @@ def run_tests():
                     c_otp_smtp, _, otp_smtp_body = _http_request(
                         "http://127.0.0.1:38090/portal/otp/request",
                         method="POST",
-                        headers={"Accept": "application/json"},
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
                         body={"email": secret_visitor_email, "consent": True},
                     )
                     assert c_otp_smtp == 202
                     otp_smtp_json = json.loads(otp_smtp_body)
+                    assert otp_smtp_json["max_attempts"] == 3
                     assert captured_smtp["password"] == smtp_secret_pw
                     assert captured_smtp["recipient"] == secret_visitor_email
                     assert captured_smtp["otp"] is not None
 
-                    # Verificar OTP correcto
-                    c_ver_bad, _, _ = _http_request(
-                        "http://127.0.0.1:38090/portal/otp/verify",
-                        method="POST",
-                        headers={"Accept": "application/json"},
-                        body={
-                            "challenge_id": otp_smtp_json["challenge_id"],
-                            "email": secret_visitor_email,
-                            "otp_code": "000000" if captured_smtp["otp"] != "000000" else "111111",
-                            "consent": True,
-                        },
-                    )
-                    assert c_ver_bad == 401
+                    # Verificar archivo portal_secret con permisos 0600 y HMAC-SHA256 real en otp_challenges
+                    assert os.path.exists(portal_secret_file), "Debe generarse portal_secret automáticamente"
+                    assert stat.S_IMODE(os.stat(portal_secret_file).st_mode) == 0o600, "portal_secret debe tener permisos 0600"
+                    with open(portal_secret_file, "r", encoding="utf-8") as sf:
+                        portal_secret_bytes = sf.read().strip().encode("utf-8")
+                    expected_hmac = hmac.new(
+                        portal_secret_bytes,
+                        secret_visitor_email.encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
+                    bare_sha256 = hashlib.sha256(secret_visitor_email.encode("utf-8")).hexdigest()
+                    with sqlite3.connect(portal_db_path) as sconn:
+                        row_ch = sconn.execute(
+                            "SELECT email_hash FROM otp_challenges WHERE challenge_id = ?",
+                            (otp_smtp_json["challenge_id"],),
+                        ).fetchone()
+                    assert row_ch is not None
+                    assert row_ch[0] == expected_hmac, "otp_challenges.email_hash debe usar HMAC-SHA256 con secreto del servidor"
+                    assert row_ch[0] != bare_sha256
 
+                    # Validar OTP y registrar sesión con telemetry real
                     c_ver_ok, _, ver_ok_body = _http_request(
                         "http://127.0.0.1:38090/portal/otp/verify",
                         method="POST",
-                        headers={"Accept": "application/json"},
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
                         body={
                             "challenge_id": otp_smtp_json["challenge_id"],
                             "email": secret_visitor_email,
                             "otp_code": captured_smtp["otp"],
                             "consent": True,
+                            "screen": "1080x2400x24",
+                            "timezone": "America/Argentina/Buenos_Aires",
+                            "language": "es-AR",
+                            "canvas_hash": "c1a2b3d4",
+                            "fonts_hash": "f9e8d7c6",
                         },
                     )
-                    assert c_ver_ok == 200
-                    assert json.loads(ver_ok_body)["otp_verified"] is True
+                    assert c_ver_ok == 200, f"Validación OTP correcta debe retornar 200, retornó {c_ver_ok}: {ver_ok_body}"
+                    reg1 = json.loads(ver_ok_body)
+                    assert reg1["accepted"] and reg1["status"] == "active"
+                    assert reg1["otp_verified"] is True and reg1["mail_verified"] is True
+                    assert "dhcp_lease_sec" not in reg1 and "bandwidth_kbps" not in reg1, (
+                        "El portal NO debe entregar dhcp_lease_sec ni bandwidth_kbps al visitante"
+                    )
+
+                    # Verificar render HTML del portal (tampoco muestra lease/bw)
+                    c_html_ok, _, otp_req_html = _http_request(
+                        "http://127.0.0.1:38090/portal/otp/request",
+                        method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        raw_body=f"email={urllib.parse.quote('visitante.html@empresa.org')}&consent=1".encode("utf-8"),
+                    )
+                    assert c_html_ok == 202
+                    cid_html = re.search(r'name="challenge_id" value="([^"]+)"', otp_req_html).group(1)
+                    c_ver_html, _, ver_html_body = _http_request(
+                        "http://127.0.0.1:38090/portal/otp/verify",
+                        method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        raw_body=(
+                            f"challenge_id={urllib.parse.quote(cid_html)}"
+                            f"&email={urllib.parse.quote('visitante.html@empresa.org')}"
+                            f"&otp_code={captured_smtp['otp']}&consent=1"
+                        ).encode("utf-8"),
+                    )
+                    assert c_ver_html == 200
+                    assert "Lease DHCP" not in ver_html_body and "Ancho de banda" not in ver_html_body
+                    assert "10240" not in ver_html_body and "300s" not in ver_html_body
+
+                    # Verificar máximo 3 intentos por desafío OTP (el 4to intento falla aunque el código sea válido)
+                    c_otp_max, _, otp_max_body = _http_request(
+                        "http://127.0.0.1:38090/portal/otp/request",
+                        method="POST",
+                        headers={"Accept": "application/json"},
+                        body={"email": "maxintentos@empresa.org", "consent": True},
+                    )
+                    assert c_otp_max == 202
+                    cid_max = json.loads(otp_max_body)["challenge_id"]
+                    real_otp_max = captured_smtp["otp"]
+                    wrong_otp = "000000" if real_otp_max != "000000" else "111111"
+                    for _attempt in range(3):
+                        c_bad, _, _ = _http_request(
+                            "http://127.0.0.1:38090/portal/otp/verify",
+                            method="POST",
+                            headers={"Accept": "application/json"},
+                            body={
+                                "challenge_id": cid_max,
+                                "email": "maxintentos@empresa.org",
+                                "otp_code": wrong_otp,
+                                "consent": True,
+                            },
+                        )
+                        assert c_bad == 401
+                    c_fourth, _, fourth_body = _http_request(
+                        "http://127.0.0.1:38090/portal/otp/verify",
+                        method="POST",
+                        headers={"Accept": "application/json"},
+                        body={
+                            "challenge_id": cid_max,
+                            "email": "maxintentos@empresa.org",
+                            "otp_code": real_otp_max,
+                            "consent": True,
+                        },
+                    )
+                    assert c_fourth == 401, "Después de 3 intentos fallidos el desafío OTP debe quedar bloqueado"
+                    assert "Demasiados intentos" in json.loads(fourth_body)["error"]
                 finally:
                     smtplib.SMTP = orig_smtp
                     os.environ.pop("HONEYGATE_SMTP_HOST", None)
@@ -604,7 +587,7 @@ def run_tests():
                     os.environ.pop("HONEYGATE_SMTP_USER", None)
                     os.environ.pop("HONEYGATE_SMTP_PASS", None)
 
-                # Verificar que en modo normal ni el mail, ni el OTP, ni la contraseña SMTP están en logs o events
+                # Verificar que en modo normal ni el mail, ni el OTP, ni la contraseña SMTP están en logs o SQLite
                 normal_logs = log_stream.getvalue()
                 assert secret_visitor_email not in normal_logs, "Email de visitante NO debe aparecer en logs normales"
                 assert captured_smtp["otp"] not in normal_logs, "OTP NO debe aparecer en logs en modo normal"
@@ -615,7 +598,140 @@ def run_tests():
                 assert smtp_secret_pw.encode("utf-8") not in db_raw, "Contraseña SMTP NO puede guardarse en SQLite"
                 assert captured_smtp["otp"].encode("utf-8") not in db_raw, "OTP en claro NO puede guardarse en SQLite"
 
-                # 11.9 Modo laboratorio explícito: loguea OTP pero sigue sin loguear el email del visitante
+                # Comprobar en /api/sessions los fingerprints reales/vacíos y los valores sugeridos en SQLite
+                _, _, p_sess_body = _http_request(
+                    "http://127.0.0.1:38890/api/sessions?limit=10",
+                    headers=p_auth_hdr,
+                )
+                sessions_list = json.loads(p_sess_body)["sessions"]
+                p_sess = next(s for s in sessions_list if s.get("visitor_label") == secret_visitor_email)
+                browser_fp = json.loads(p_sess["origin"]["fingerprints"]["browser"])
+                network_fp = json.loads(p_sess["origin"]["fingerprints"]["network"])
+                assert p_sess["origin"]["mac"] == "aa:bb:cc:11:22:33"
+                assert "Android" in browser_fp["user_agent"]
+                assert browser_fp["screen"] == "1080x2400x24"
+                assert "User-Agent" in network_fp["http_header_order"]
+                assert network_fp["ja3"] == "" and network_fp["ja4"] == "", "JA3/JA4 no medidos deben quedar vacíos"
+                assert p_sess["origin"]["fingerprints"]["dhcp"] == "", "DHCP Option 55 no medido debe quedar vacío"
+                assert p_sess["session"]["mail_verified"] is True
+                assert p_sess["session"]["dhcp_lease_sec"] == 300 and p_sess["session"]["bandwidth_kbps"] == 10240
+
+                # 11.4 Modo laboratorio con HONEYGATE_PORTAL_OTP_OPTIONAL=1 -> sesión marcada "mail sin verificar" + Anti-Sybil
+                os.environ["HONEYGATE_PORTAL_OTP_OPTIONAL"] = "1"
+                try:
+                    # Dominio desechable rechazado (sin aislar IP)
+                    c_disp, _, _ = _http_request(
+                        "http://127.0.0.1:38090/portal/register",
+                        method="POST",
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        body={"email": "desechable@mailinator.com", "consent": True},
+                    )
+                    assert c_disp == 400
+                    assert "127.0.0.1" not in p_honeywall.get_snapshot()["isolated_ips"]
+
+                    # Registro sin OTP permitido explícitamente -> marcado mail_verified=False ("mail sin verificar")
+                    c_opt_reg, _, opt_reg_body = _http_request(
+                        "http://127.0.0.1:38090/portal/register",
+                        method="POST",
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        body={
+                            "email": "sinotp.lab@empresa.org",
+                            "consent": True,
+                            "screen": "1080x2400x24",
+                            "timezone": "America/Argentina/Buenos_Aires",
+                            "language": "es-AR",
+                            "canvas_hash": "c1a2b3d4",
+                            "fonts_hash": "f9e8d7c6",
+                        },
+                    )
+                    assert c_opt_reg == 200
+                    opt_reg_json = json.loads(opt_reg_body)
+                    assert opt_reg_json["mail_verified"] is False
+                    assert opt_reg_json["mail_status"] == "mail sin verificar"
+                    assert "dhcp_lease_sec" not in opt_reg_json and "bandwidth_kbps" not in opt_reg_json
+
+                    _, _, opt_sess_body = _http_request(
+                        "http://127.0.0.1:38890/api/sessions?limit=10",
+                        headers=p_auth_hdr,
+                    )
+                    opt_sess = next(
+                        s for s in json.loads(opt_sess_body)["sessions"]
+                        if s.get("visitor_label") == "sinotp.lab@empresa.org"
+                    )
+                    assert opt_sess["session"]["mail_verified"] is False
+
+                    # Exceder sybil_max_emails_per_device (2) -> en_observacion con lease y bw reducidos sugeridos
+                    c_syb, _, syb_body = _http_request(
+                        "http://127.0.0.1:38090/portal/register",
+                        method="POST",
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        body={
+                            "email": "tercero.sybil@empresa.org",
+                            "consent": True,
+                            "screen": "1080x2400x24",
+                            "timezone": "America/Argentina/Buenos_Aires",
+                            "language": "es-AR",
+                            "canvas_hash": "c1a2b3d4",
+                            "fonts_hash": "f9e8d7c6",
+                        },
+                    )
+                    assert c_syb == 200
+                    syb_json = json.loads(syb_body)
+                    assert syb_json["status"] == "en_observacion"
+                    assert "dhcp_lease_sec" not in syb_json and "bandwidth_kbps" not in syb_json
+                    assert "127.0.0.1" not in p_honeywall.get_snapshot()["isolated_ips"]
+
+                    _, _, syb_sess_body = _http_request(
+                        "http://127.0.0.1:38890/api/sessions?limit=10",
+                        headers=p_auth_hdr,
+                    )
+                    syb_sess = next(
+                        s for s in json.loads(syb_sess_body)["sessions"]
+                        if s.get("visitor_label") == "tercero.sybil@empresa.org"
+                    )
+                    assert syb_sess["session"]["dhcp_lease_sec"] == 60 and syb_sess["session"]["bandwidth_kbps"] == 256
+
+                    # Rotación de MAC con misma huella de navegador -> en_observacion
+                    simulated_mac["val"] = "de:ad:be:ef:00:99"
+                    c_rot, _, rot_body = _http_request(
+                        "http://127.0.0.1:38090/portal/register",
+                        method="POST",
+                        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14)"},
+                        body={
+                            "email": "rotacion.mac@empresa.org",
+                            "consent": True,
+                            "screen": "1080x2400x24",
+                            "timezone": "America/Argentina/Buenos_Aires",
+                            "language": "es-AR",
+                            "canvas_hash": "c1a2b3d4",
+                            "fonts_hash": "f9e8d7c6",
+                        },
+                    )
+                    assert c_rot == 200
+                    rot_json = json.loads(rot_body)
+                    assert rot_json["status"] == "en_observacion"
+                    assert "Rotación de MAC" in rot_json["observed_reason"]
+                finally:
+                    os.environ.pop("HONEYGATE_PORTAL_OTP_OPTIONAL", None)
+
+                # 11.5 Escape XSS en portal y panel admin + etiquetas sugeridas y 'mail sin verificar' en panel
+                xss_raw = '"><script>alert(1)</script>'
+                c_xss_portal, _, xss_portal_html = _http_request(
+                    "http://127.0.0.1:38090/portal/otp/request",
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    raw_body=f"email={urllib.parse.quote(xss_raw)}&consent=1".encode("utf-8"),
+                )
+                assert c_xss_portal == 400
+                assert "<script>alert(1)</script>" not in xss_portal_html
+                assert "&lt;script&gt;alert(1)&lt;/script&gt;" in xss_portal_html
+
+                _, _, dash_html = _http_request("http://127.0.0.1:38890/")
+                assert ".replace(/\"/g, '&quot;')" in dash_html and "escapeHtml(item.visitor_label)" in dash_html
+                assert "sugerido (no aplicado por el daemon)" in dash_html
+                assert "mail sin verificar" in dash_html
+
+                # 11.6 Modo laboratorio explícito: loguea OTP pero sigue sin loguear el email del visitante
                 os.environ["HONEYGATE_PORTAL_LAB_MODE"] = "1"
                 try:
                     c_lab, _, lab_body = _http_request(
@@ -632,11 +748,97 @@ def run_tests():
                 finally:
                     os.environ.pop("HONEYGATE_PORTAL_LAB_MODE", None)
 
-                # 11.10 Modo 2 deshabilita el portal (503)
+                # 11.7 Rate limits persistidos en SQLite con respuesta 429:
+                #   - /portal/otp/request: max 3 por mail cada 15 min y max 10 por IP cada hora
+                #   - /portal/register: max 20 por IP cada hora
+                rl_db_path = os.path.join(tmpdir, "portal_rl_test.db")
+                rl_storage = HoneyGateStorage(db_path=rl_db_path)
+                rl_storage.update_config({"mode": 1, "portal_enabled": True})
+                rl_portal = AsyncPortalServer(
+                    storage=rl_storage,
+                    host="127.0.0.1",
+                    port=38091,
+                    portal_secret_path=portal_secret_file,
+                )
+                os.environ["HONEYGATE_PORTAL_LAB_MODE"] = "1"
+                rl_portal.start_background()
+                time.sleep(0.25)
+                try:
+                    # 3 por mail destino cada 15 minutos -> el 4to retorna 429
+                    for _i in range(3):
+                        c_em, _, _ = _http_request(
+                            "http://127.0.0.1:38091/portal/otp/request",
+                            method="POST",
+                            headers={"Accept": "application/json"},
+                            body={"email": "repetido@empresa.org", "consent": True},
+                        )
+                        assert c_em == 202
+                    c_em_429, _, _ = _http_request(
+                        "http://127.0.0.1:38091/portal/otp/request",
+                        method="POST",
+                        headers={"Accept": "application/json"},
+                        body={"email": "repetido@empresa.org", "consent": True},
+                    )
+                    assert c_em_429 == 429, f"4to OTP al mismo mail debe dar 429, dio {c_em_429}"
+
+                    # Reiniciar almacenamiento y servidor para verificar persistencia en SQLite de los contadores
+                    rl_portal.stop()
+                    rl_storage.close()
+                    rl_storage2 = HoneyGateStorage(db_path=rl_db_path)
+                    rl_portal2 = AsyncPortalServer(
+                        storage=rl_storage2,
+                        host="127.0.0.1",
+                        port=38092,
+                        portal_secret_path=portal_secret_file,
+                    )
+                    rl_portal2.start_background()
+                    time.sleep(0.25)
+                    try:
+                        # Ya hubo 3 aceptados desde 127.0.0.1 en /portal/otp/request; otros 7 mails distintos llegan a 10
+                        for idx in range(7):
+                            c_ip_ok, _, _ = _http_request(
+                                "http://127.0.0.1:38092/portal/otp/request",
+                                method="POST",
+                                headers={"Accept": "application/json"},
+                                body={"email": f"distinto{idx}@empresa.org", "consent": True},
+                            )
+                            assert c_ip_ok == 202, f"Pedido #{4 + idx} desde IP debe aceptarse, dio {c_ip_ok}"
+                        # El #11 desde misma IP en /portal/otp/request debe devolver 429 aunque sea mail nuevo
+                        c_ip_429, _, _ = _http_request(
+                            "http://127.0.0.1:38092/portal/otp/request",
+                            method="POST",
+                            headers={"Accept": "application/json"},
+                            body={"email": "distinto_overflow@empresa.org", "consent": True},
+                        )
+                        assert c_ip_429 == 429, f"11vo OTP desde misma IP debe dar 429, dio {c_ip_429}"
+
+                        # /portal/register: máximo 20 por IP cada hora -> el #21 debe devolver 429
+                        for idx in range(20):
+                            c_reg_lim, _, _ = _http_request(
+                                "http://127.0.0.1:38092/portal/register",
+                                method="POST",
+                                headers={"Accept": "application/json"},
+                                body={"email": f"reg{idx}@empresa.org", "consent": True},
+                            )
+                            assert c_reg_lim == 403, f"Registro #{idx + 1} antes del límite debe dar 403 (OTP obligatorio), dio {c_reg_lim}"
+                        c_reg_429, _, _ = _http_request(
+                            "http://127.0.0.1:38092/portal/register",
+                            method="POST",
+                            headers={"Accept": "application/json"},
+                            body={"email": "reg21@empresa.org", "consent": True},
+                        )
+                        assert c_reg_429 == 429, f"21vo /portal/register desde misma IP debe dar 429, dio {c_reg_429}"
+                    finally:
+                        rl_portal2.stop()
+                        rl_storage2.close()
+                finally:
+                    os.environ.pop("HONEYGATE_PORTAL_LAB_MODE", None)
+
+                # 11.8 Modo 2 deshabilita el portal (503)
                 p_storage.update_config({"mode": 2})
                 c_m2, _, _ = _http_request("http://127.0.0.1:38090/")
                 assert c_m2 == 503
-                print("       -> Portal Cautivo Modo 1, Anti-Sybil, XSS, SMTP y privacidad de logs: OK")
+                print("       -> Portal Cautivo Modo 1, OTP obligatorio, 3 intentos, 429 SQLite, HMAC 0600, Anti-Sybil y XSS: OK")
             finally:
                 root_logger.removeHandler(mem_handler)
                 p_portal.stop()
@@ -646,6 +848,10 @@ def run_tests():
                     os.environ["HONEYGATE_API_TOKEN"] = prev_token_env
                 if prev_lab_env is not None:
                     os.environ["HONEYGATE_PORTAL_LAB_MODE"] = prev_lab_env
+                if prev_opt_env is not None:
+                    os.environ["HONEYGATE_PORTAL_OTP_OPTIONAL"] = prev_opt_env
+                if prev_secret_env is not None:
+                    os.environ["HONEYGATE_PORTAL_SECRET"] = prev_secret_env
                 if prev_smtp_host is not None:
                     os.environ["HONEYGATE_SMTP_HOST"] = prev_smtp_host
                 if prev_smtp_pass is not None:

@@ -407,6 +407,19 @@ fun SessionItemCard(
         Text("visitor_label: ${session.visitorLabel}", fontSize = 10.sp, color = TextPrimary)
       }
 
+      if (session.mailVerified == false) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Surface(shape = RoundedCornerShape(4.dp), color = AmberGlow) {
+          Text(
+            text = "mail sin verificar",
+            color = WarningAmber,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+          )
+        }
+      }
+
       if (session.observedReason.isNotBlank()) {
         Text("observed_reason: ${session.observedReason}", fontSize = 9.sp, color = WarningAmber, fontWeight = FontWeight.SemiBold)
       }
@@ -419,7 +432,7 @@ fun SessionItemCard(
           Text("• duration_sec: ${session.durationSeconds}s | bytes_in: ${session.bytesIn} | bytes_out: ${session.bytesOut}", fontSize = 9.sp, color = TextSecondary, fontFamily = FontFamily.Monospace)
           if (session.dhcpLeaseSec != null || session.bandwidthKbps != null) {
             Text(
-              "• dhcp_lease_sec: ${session.dhcpLeaseSec ?: "—"}s | bandwidth_kbps: ${session.bandwidthKbps ?: "—"} kbps",
+              "• Lease DHCP: ${session.dhcpLeaseSec ?: "—"}s | Ancho de banda: ${session.bandwidthKbps ?: "—"} kbps — sugerido (no aplicado por el daemon)",
               fontSize = 9.sp,
               color = TextSecondary,
               fontFamily = FontFamily.Monospace

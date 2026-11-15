@@ -81,6 +81,7 @@ data class DaemonSessionDto(
   val bytesOut: Long,
   val dhcpLeaseSec: Int? = null,
   val bandwidthKbps: Int? = null,
+  val mailVerified: Boolean? = null,
   val observedReason: String?,
   val visitorLabel: String?
 )
@@ -140,6 +141,10 @@ class HoneyGateDaemonClient {
       return if (!has(key) || isNull(key)) null else optInt(key)
     }
 
+    private fun JSONObject.optBooleanOrNull(key: String): Boolean? {
+      return if (!has(key) || isNull(key)) null else optBoolean(key)
+    }
+
     fun parseConfigJson(jsonText: String): DaemonConfigDto {
       val obj = JSONObject(jsonText)
       val wlArray = obj.optJSONArray("egress_whitelist") ?: JSONArray()
@@ -191,6 +196,7 @@ class HoneyGateDaemonClient {
         bytesOut = sessionObj.optLong("bytes_out", 0L),
         dhcpLeaseSec = sessionObj.optIntOrNull("dhcp_lease_sec"),
         bandwidthKbps = sessionObj.optIntOrNull("bandwidth_kbps"),
+        mailVerified = sessionObj.optBooleanOrNull("mail_verified"),
         observedReason = sessionObj.optStringOrNull("observed_reason"),
         visitorLabel = item.optStringOrNull("visitor_label")
       )

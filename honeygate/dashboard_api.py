@@ -174,7 +174,7 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                         <th>Origen (IP / MAC)</th>
                         <th>Device ID</th>
                         <th>Etiqueta / Servicio</th>
-                        <th>Lease</th>
+                        <th>Lease / BW sugerido</th>
                         <th>Estado</th>
                     </tr>
                 </thead>
@@ -319,14 +319,19 @@ HTML_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                             const sess = item.session || {};
                             const st = String(sess.status || item.status || 'active');
                             const badgeCls = st === 'isolated' ? 'crit' : (st === 'en_observacion' ? 'warn' : 'safe');
-                            const leaseTxt = sess.dhcp_lease_sec ? (escapeHtml(sess.dhcp_lease_sec) + 's') : '—';
+                            const leasePart = sess.dhcp_lease_sec ? (escapeHtml(sess.dhcp_lease_sec) + 's') : '—';
+                            const bwPart = sess.bandwidth_kbps ? (escapeHtml(sess.bandwidth_kbps) + ' kbps') : '—';
+                            const leaseTxt = `${leasePart} / ${bwPart}<div style="font-size:10px;color:#94a3b8;">sugerido (no aplicado por el daemon)</div>`;
                             const labelTxt = item.visitor_label ? escapeHtml(item.visitor_label) : escapeHtml(target.service || '—');
+                            const mailBadge = sess.mail_verified === false
+                                ? '<div style="margin-top:4px;"><span class="badge warn">mail sin verificar</span></div>'
+                                : '';
                             const reasonTxt = sess.observed_reason ? ('<div style="font-size:10px;color:#ffcc00;">' + escapeHtml(sess.observed_reason) + '</div>') : '';
                             tr.innerHTML = `
                                 <td>#${escapeHtml(item.id)}</td>
                                 <td><strong>${escapeHtml(origin.ip || '')}</strong><br><code style="font-size:11px;">${escapeHtml(origin.mac || '')}</code></td>
                                 <td><code style="font-size:11px;">${escapeHtml(origin.device_id || '')}</code></td>
-                                <td>${labelTxt}${reasonTxt}</td>
+                                <td>${labelTxt}${mailBadge}${reasonTxt}</td>
                                 <td>${leaseTxt}</td>
                                 <td><span class="badge ${badgeCls}">${escapeHtml(st)}</span></td>
                             `;

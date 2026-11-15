@@ -98,6 +98,7 @@ class HoneyGateStorage:
                 bytes_out INTEGER NOT NULL DEFAULT 0,
                 dhcp_lease_sec INTEGER NOT NULL DEFAULT 300,
                 bandwidth_kbps INTEGER NOT NULL DEFAULT 10240,
+                mail_verified INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'closed', 'isolated', 'en_observacion')),
                 observed_reason TEXT NOT NULL DEFAULT ''
@@ -172,6 +173,17 @@ class HoneyGateStorage:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 verified INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS portal_rate_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT NOT NULL,
+                key_type TEXT NOT NULL,
+                key_value TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_portal_rl_lookup
+                ON portal_rate_limits(endpoint, key_type, key_value, created_at);
             """
         )
 
@@ -186,6 +198,8 @@ class HoneyGateStorage:
             cur.execute("ALTER TABLE sessions ADD COLUMN dhcp_lease_sec INTEGER NOT NULL DEFAULT 300")
         if "bandwidth_kbps" not in existing_cols:
             cur.execute("ALTER TABLE sessions ADD COLUMN bandwidth_kbps INTEGER NOT NULL DEFAULT 10240")
+        if "mail_verified" not in existing_cols:
+            cur.execute("ALTER TABLE sessions ADD COLUMN mail_verified INTEGER NOT NULL DEFAULT 1")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_browser_hash ON sessions(browser_hash)")
 
         row = cur.execute("SELECT id FROM daemon_config WHERE id = 1").fetchone()
@@ -331,6 +345,7 @@ class HoneyGateStorage:
                 "bytes_out": int(row["bytes_out"]),
                 "dhcp_lease_sec": int(row["dhcp_lease_sec"]),
                 "bandwidth_kbps": int(row["bandwidth_kbps"]),
+                "mail_verified": (bool(row["mail_verified"]) if row["service"] == "portal-cautivo" else None),
                 "observed_reason": row["observed_reason"] or None,
             },
             "device_id": row["device_id"],
@@ -365,6 +380,7 @@ class HoneyGateStorage:
         status: str = "active",
         dhcp_lease_sec: int = 300,
         bandwidth_kbps: int = 10240,
+        mail_verified: bool = True,
         observed_reason: str = "",
     ) -> int:
         """Inserta una nueva sesión en el esquema unificado y retorna su ID."""
@@ -382,8 +398,8 @@ class HoneyGateStorage:
                     browser_fingerprint, browser_hash, network_fingerprint, dhcp_fingerprint,
                     dest_ip, dest_port, service, honeytoken_touched, visitor_label,
                     fd, started_at, ended_at, duration_sec, bytes_in, bytes_out,
-                    dhcp_lease_sec, bandwidth_kbps, status, observed_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0.0, 0, 0, ?, ?, ?, ?)
+                    dhcp_lease_sec, bandwidth_kbps, mail_verified, status, observed_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0.0, 0, 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     effective_mode,
@@ -405,6 +421,7 @@ class HoneyGateStorage:
                     now,
                     int(dhcp_lease_sec),
                     int(bandwidth_kbps),
+                    1 if mail_verified else 0,
                     status,
                     observed_reason,
                 ),
@@ -856,12 +873,56 @@ class HoneyGateStorage:
             )
             self._conn.commit()
 
+    def check_and_increment_rate_limit(
+        self,
+        endpoint: str,
+        checks: List[Tuple[str, str, int, int]],
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Verifica e incrementa contadores persistentes en SQLite para limitar pedidos.
+        Cada elemento de `checks` es (key_type, key_value, max_count, window_sec).
+        """
+        now = time.time()
+        with self._lock:
+            # Limpieza periódica de entradas antiguas (> 2 horas)
+            self._conn.execute(
+                "DELETE FROM portal_rate_limits WHERE created_at < ?",
+                (now - 7200.0,),
+            )
+            for key_type, key_value, max_count, window_sec in checks:
+                since_ts = now - float(window_sec)
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM portal_rate_limits
+                    WHERE endpoint = ? AND key_type = ? AND key_value = ? AND created_at >= ?
+                    """,
+                    (endpoint, key_type, key_value, since_ts),
+                ).fetchone()
+                cnt = int(row["cnt"]) if row else 0
+                if cnt >= int(max_count):
+                    return False, (
+                        f"Límite de pedidos excedido en {endpoint} "
+                        f"({max_count} cada {window_sec // 60} min)"
+                    )
+
+            for key_type, key_value, _max_count, _window_sec in checks:
+                self._conn.execute(
+                    """
+                    INSERT INTO portal_rate_limits (endpoint, key_type, key_value, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (endpoint, key_type, key_value, now),
+                )
+            self._conn.commit()
+            return True, None
+
     def verify_otp_challenge(
         self,
         challenge_id: str,
         email_hash: str,
         otp_code: str,
-        max_attempts: int = 5,
+        max_attempts: int = 3,
     ) -> Tuple[bool, str]:
         now = time.time()
         with self._lock:

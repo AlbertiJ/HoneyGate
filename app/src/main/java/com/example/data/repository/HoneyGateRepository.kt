@@ -433,6 +433,7 @@ class HoneyGateRepository(
         bytesOut = dto.bytesOut,
         dhcpLeaseSec = dto.dhcpLeaseSec,
         bandwidthKbps = dto.bandwidthKbps,
+        mailVerified = dto.mailVerified,
         visitorLabel = dto.visitorLabel ?: "",
         observedReason = dto.observedReason ?: "",
         isMacBlocked = dto.status == "isolated",

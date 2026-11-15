@@ -10,6 +10,7 @@ y escape estricto contra XSS en portal HTML.
 
 import os
 import re
+import hmac
 import html
 import json
 import time
@@ -34,6 +35,16 @@ OBSERVED_LEASE_SEC = 60
 DEFAULT_BANDWIDTH_KBPS = 10240
 OBSERVED_BANDWIDTH_KBPS = 256
 OTP_TTL_SECONDS = 300
+OTP_MAX_ATTEMPTS = 3
+DEFAULT_PORTAL_SECRET_PATH = os.path.join("data", "portal_secret")
+
+# Límites de pedidos por endpoint (persistidos en SQLite, respuesta HTTP 429)
+RATE_LIMIT_OTP_IP_MAX = 10
+RATE_LIMIT_OTP_IP_WINDOW_SEC = 3600
+RATE_LIMIT_OTP_EMAIL_MAX = 3
+RATE_LIMIT_OTP_EMAIL_WINDOW_SEC = 900
+RATE_LIMIT_REGISTER_IP_MAX = 20
+RATE_LIMIT_REGISTER_IP_WINDOW_SEC = 3600
 
 RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,189}\.[A-Za-z]{2,24}$")
 
@@ -66,12 +77,48 @@ def is_lab_mode_enabled() -> bool:
     )
 
 
-def is_otp_required_by_env() -> bool:
-    return os.environ.get("HONEYGATE_PORTAL_REQUIRE_OTP", "").strip().lower() in (
+def is_otp_optional_by_env() -> bool:
+    return os.environ.get("HONEYGATE_PORTAL_OTP_OPTIONAL", "").strip().lower() in (
         "1",
         "true",
         "yes",
     )
+
+
+def load_or_create_portal_secret(secret_path: str = DEFAULT_PORTAL_SECRET_PATH) -> bytes:
+    """
+    Obtiene la clave HMAC del portal desde HONEYGATE_PORTAL_SECRET o, si no existe,
+    la genera una vez y la persiste en `data/portal_secret` con permisos 0600 (fuera de git).
+    """
+    env_secret = os.environ.get("HONEYGATE_PORTAL_SECRET", "").strip()
+    if env_secret:
+        return env_secret.encode("utf-8")
+
+    parent_dir = os.path.dirname(os.path.abspath(secret_path))
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    if os.path.exists(secret_path):
+        try:
+            os.chmod(secret_path, 0o600)
+        except OSError:
+            pass
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            existing = fh.read().strip()
+        if existing:
+            return existing.encode("utf-8")
+
+    generated = secrets.token_hex(32)
+    fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (generated + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(secret_path, 0o600)
+    except OSError:
+        pass
+    return generated.encode("utf-8")
 
 
 def _clean_text(value: Any, max_len: int = 254) -> str:
@@ -84,6 +131,10 @@ def _clean_text(value: Any, max_len: int = 254) -> str:
 
 def _sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _hmac_sha256_hex(secret_key: bytes, text: str) -> str:
+    return hmac.new(secret_key, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _infer_device_type(user_agent: str) -> str:
@@ -262,11 +313,11 @@ def render_portal_html(
     last_result: Optional[Dict[str, Any]] = None,
     challenge_id: str = "",
     otp_available: bool = False,
-    otp_required: bool = False,
+    otp_optional: bool = False,
 ) -> str:
     """
     Genera el HTML del portal cautivo escapando toda entrada del visitante.
-    NUNCA incluye token de API ni llamadas a /api/*.
+    NUNCA incluye token de API, llamadas a /api/* ni valores sugeridos de lease/ancho de banda.
     """
     safe_email = html.escape(last_email, quote=True)
     safe_banner = html.escape(banner_message, quote=True)
@@ -281,15 +332,19 @@ def render_portal_html(
     if last_result:
         r_status = html.escape(str(last_result.get("status", "")), quote=True)
         r_dev = html.escape(str(last_result.get("device_id", "")), quote=True)
-        r_lease = html.escape(str(last_result.get("dhcp_lease_sec", "")), quote=True)
-        r_bw = html.escape(str(last_result.get("bandwidth_kbps", "")), quote=True)
         r_reason = html.escape(str(last_result.get("observed_reason", "")), quote=True)
+        mail_verified = last_result.get("mail_verified", True)
+        mail_row = (
+            "<p><strong>Verificación de correo:</strong> mail sin verificar (modo laboratorio)</p>"
+            if mail_verified is False
+            else "<p><strong>Verificación de correo:</strong> correo verificado por OTP</p>"
+        )
         reason_row = f"<p><strong>Motivo de observación:</strong> {r_reason}</p>" if r_reason else ""
         result_block = (
             '<div class="result-card" id="portal-result">'
             f"<p><strong>Estado de sesión:</strong> {r_status}</p>"
             f"<p><strong>Device ID:</strong> <code>{r_dev}</code></p>"
-            f"<p><strong>Lease DHCP:</strong> {r_lease}s | <strong>Ancho de banda:</strong> {r_bw} kbps</p>"
+            f"{mail_row}"
             f"{reason_row}"
             "</div>"
         )
@@ -307,7 +362,7 @@ def render_portal_html(
                 <input type="hidden" name="language" class="fp-lang" value="">
                 <input type="hidden" name="canvas_hash" class="fp-canvas" value="">
                 <input type="hidden" name="fonts_hash" class="fp-fonts" value="">
-                <label for="otp_code">Código OTP (6 dígitos)</label>
+                <label for="otp_code">Código OTP (6 dígitos, máximo {OTP_MAX_ATTEMPTS} intentos)</label>
                 <input type="text" id="otp_code" name="otp_code" inputmode="numeric" maxlength="10" required placeholder="000000">
                 <label class="consent">
                     <input type="checkbox" name="consent" value="1" required>
@@ -318,16 +373,20 @@ def render_portal_html(
         </section>
         """
 
-    otp_btn = ""
-    if otp_available:
-        otp_btn = (
+    secondary_btn = ""
+    if otp_optional and otp_available:
+        secondary_btn = (
             '<button type="submit" formaction="/portal/otp/request" class="secondary">'
             "Solicitar código OTP por correo"
             "</button>"
         )
 
-    primary_action = "/portal/otp/request" if otp_required else "/portal/register"
-    primary_label = "Solicitar código OTP" if otp_required else "Registrar acceso (sin contraseña)"
+    primary_action = "/portal/register" if otp_optional else "/portal/otp/request"
+    primary_label = (
+        "Registrar acceso sin OTP (modo laboratorio)"
+        if otp_optional
+        else "Solicitar código OTP por correo"
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -380,7 +439,7 @@ def render_portal_html(
                     <span>Consiento la recopilación exclusiva de metadatos técnicos de sesión conforme a la <strong>Ley 25.326</strong> (Protección de Datos Personales, AR). Nunca se inspecciona contenido de tráfico ni se solicitan contraseñas.</span>
                 </label>
                 <button type="submit">{primary_label}</button>
-                {otp_btn if not otp_required else ""}
+                {secondary_btn}
             </form>
             <div class="legal">
                 <strong>Aviso Legal (Ley 25.326 y Ley 26.388):</strong> El uso de esta red está autorizado exclusivamente para fines operativos legítimos o auditorías autorizadas por el propietario de la infraestructura.
@@ -455,10 +514,16 @@ class PortalService:
         storage: HoneyGateStorage,
         alert_callback: Optional[Callable[[str, str, str], None]] = None,
         mac_resolver: Optional[Callable[[str], str]] = None,
+        portal_secret_path: str = DEFAULT_PORTAL_SECRET_PATH,
     ):
         self.storage = storage
         self.alert_callback = alert_callback
         self.mac_resolver = mac_resolver or HoneyGateHoneywall.resolve_mac_address
+        self.portal_secret_path = portal_secret_path
+        self.portal_secret = load_or_create_portal_secret(portal_secret_path)
+
+    def _hmac_email(self, email: str) -> str:
+        return _hmac_sha256_hex(self.portal_secret, email)
 
     def is_portal_active(self) -> Tuple[bool, str]:
         cfg = self.storage.get_config()
@@ -567,7 +632,7 @@ class PortalService:
         fp: Dict[str, Any],
         otp_verified: bool,
     ) -> Tuple[int, Dict[str, Any]]:
-        email_hash = _sha256_hex(email)
+        email_hash = self._hmac_email(email)
         cfg = self.storage.get_config()
         mode = int(cfg.get("mode", 1))
 
@@ -583,8 +648,6 @@ class PortalService:
                 "status": "rejected_disposable",
                 "error": obs_reason,
                 "device_id": fp["device_id"],
-                "dhcp_lease_sec": lease_sec,
-                "bandwidth_kbps": bw_kbps,
             }
 
         session_status = "en_observacion" if in_obs else "active"
@@ -606,6 +669,7 @@ class PortalService:
             status=session_status,
             dhcp_lease_sec=lease_sec,
             bandwidth_kbps=bw_kbps,
+            mail_verified=otp_verified,
             observed_reason=obs_reason,
         )
 
@@ -688,9 +752,9 @@ class PortalService:
             "device_id": fp["device_id"],
             "status": session_status,
             "observed_reason": obs_reason,
-            "dhcp_lease_sec": lease_sec,
-            "bandwidth_kbps": bw_kbps,
             "otp_verified": otp_verified,
+            "mail_verified": otp_verified,
+            "mail_status": "verificado" if otp_verified else "mail sin verificar",
             "consent_accepted": True,
         }
 
@@ -704,6 +768,23 @@ class PortalService:
         if not active:
             return 503, {"accepted": False, "error": reason}
 
+        allowed, rl_msg = self.storage.check_and_increment_rate_limit(
+            endpoint="/portal/register",
+            checks=[("ip", client_ip, RATE_LIMIT_REGISTER_IP_MAX, RATE_LIMIT_REGISTER_IP_WINDOW_SEC)],
+        )
+        if not allowed:
+            return 429, {"accepted": False, "error": rl_msg}
+
+        if not is_otp_optional_by_env():
+            return 403, {
+                "accepted": False,
+                "otp_required": True,
+                "error": (
+                    "La verificación por OTP es obligatoria por defecto. "
+                    "Solicitá un código en /portal/otp/request."
+                ),
+            }
+
         if not self._parse_consent(payload.get("consent")):
             return 400, {
                 "accepted": False,
@@ -713,9 +794,6 @@ class PortalService:
         email, domain, err = self._validate_email(payload.get("email"))
         if err:
             return 400, {"accepted": False, "error": err}
-
-        if is_otp_required_by_env():
-            return self.request_otp(payload, client_ip, headers)
 
         fp = build_visitor_fingerprint(
             client_ip=client_ip,
@@ -741,15 +819,32 @@ class PortalService:
         if not active:
             return 503, {"accepted": False, "error": reason}
 
+        email, domain, err = self._validate_email(payload.get("email"))
+        checks: List[Tuple[str, str, int, int]] = [
+            ("ip", client_ip, RATE_LIMIT_OTP_IP_MAX, RATE_LIMIT_OTP_IP_WINDOW_SEC),
+        ]
+        email_hash: Optional[str] = None
+        if email:
+            email_hash = self._hmac_email(email)
+            checks.append(
+                ("email", email_hash, RATE_LIMIT_OTP_EMAIL_MAX, RATE_LIMIT_OTP_EMAIL_WINDOW_SEC)
+            )
+
+        allowed, rl_msg = self.storage.check_and_increment_rate_limit(
+            endpoint="/portal/otp/request",
+            checks=checks,
+        )
+        if not allowed:
+            return 429, {"accepted": False, "error": rl_msg}
+
         if not self._parse_consent(payload.get("consent")):
             return 400, {
                 "accepted": False,
                 "error": "Debe aceptar el consentimiento informado de metadatos (Ley 25.326)",
             }
 
-        email, domain, err = self._validate_email(payload.get("email"))
-        if err:
-            return 400, {"accepted": False, "error": err}
+        if err or email is None or domain is None or email_hash is None:
+            return 400, {"accepted": False, "error": err or "Correo electrónico inválido"}
 
         if domain in DISPOSABLE_EMAIL_DOMAINS:
             fp = build_visitor_fingerprint(
@@ -785,7 +880,6 @@ class PortalService:
         challenge_id = secrets.token_urlsafe(16)
         otp_salt = secrets.token_hex(16)
         otp_hash = _sha256_hex(f"{otp_salt}:{otp_code}")
-        email_hash = _sha256_hex(email)
 
         if smtp_host:
             sent, send_err = _send_otp_via_smtp(email, otp_code)
@@ -820,6 +914,7 @@ class PortalService:
             "challenge_id": challenge_id,
             "device_id": fp["device_id"],
             "expires_in_sec": OTP_TTL_SECONDS,
+            "max_attempts": OTP_MAX_ATTEMPTS,
             "message": "Código OTP emitido. Ingresá el código para completar el acceso.",
         }
 
@@ -840,8 +935,8 @@ class PortalService:
             }
 
         email, domain, err = self._validate_email(payload.get("email"))
-        if err:
-            return 400, {"accepted": False, "error": err}
+        if err or email is None or domain is None:
+            return 400, {"accepted": False, "error": err or "Correo electrónico inválido"}
 
         challenge_id = _clean_text(payload.get("challenge_id"), 128)
         otp_code = _clean_text(payload.get("otp_code"), 16)
@@ -850,8 +945,9 @@ class PortalService:
 
         ok, verify_msg = self.storage.verify_otp_challenge(
             challenge_id=challenge_id,
-            email_hash=_sha256_hex(email),
+            email_hash=self._hmac_email(email),
             otp_code=otp_code,
+            max_attempts=OTP_MAX_ATTEMPTS,
         )
         if not ok:
             return 401, {"accepted": False, "error": verify_msg}
@@ -969,7 +1065,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
 
             html_body = render_portal_html(
                 otp_available=otp_avail,
-                otp_required=is_otp_required_by_env(),
+                otp_optional=is_otp_optional_by_env(),
             )
             self._send_html(html_body, status_code=200)
             return
@@ -992,7 +1088,11 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"accepted": False, "error": "Payload inválido"}, status_code=400)
             else:
                 self._send_html(
-                    render_portal_html(banner_message="Solicitud inválida", banner_is_error=True),
+                    render_portal_html(
+                        banner_message="Solicitud inválida",
+                        banner_is_error=True,
+                        otp_optional=is_otp_optional_by_env(),
+                    ),
                     status_code=400,
                 )
             return
@@ -1011,19 +1111,20 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         otp_avail = bool(os.environ.get("HONEYGATE_SMTP_HOST", "").strip()) or is_lab_mode_enabled()
+        otp_opt = is_otp_optional_by_env()
         raw_email = _clean_text(payload.get("email", ""), 254)
-        if result.get("otp_required"):
+        if status_code == 202 and result.get("otp_required"):
             html_body = render_portal_html(
                 banner_message=result.get("message", "Código OTP emitido."),
                 banner_is_error=False,
                 last_email=raw_email,
                 challenge_id=result.get("challenge_id", ""),
                 otp_available=otp_avail,
-                otp_required=is_otp_required_by_env(),
+                otp_optional=otp_opt,
             )
         elif result.get("accepted"):
             banner = (
-                "Acceso habilitado en observación (ancho de banda y lease reducidos)."
+                "Acceso habilitado en observación."
                 if result.get("status") == "en_observacion"
                 else "Acceso nominal habilitado."
             )
@@ -1033,7 +1134,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 last_email=raw_email,
                 last_result=result,
                 otp_available=otp_avail,
-                otp_required=is_otp_required_by_env(),
+                otp_optional=otp_opt,
             )
         else:
             html_body = render_portal_html(
@@ -1042,7 +1143,7 @@ class PortalHTTPRequestHandler(BaseHTTPRequestHandler):
                 last_email=raw_email,
                 challenge_id=_clean_text(payload.get("challenge_id", ""), 128),
                 otp_available=otp_avail,
-                otp_required=is_otp_required_by_env(),
+                otp_optional=otp_opt,
             )
         self._send_html(html_body, status_code=status_code)
 
@@ -1060,6 +1161,7 @@ class AsyncPortalServer:
         port: int = 8090,
         alert_callback: Optional[Callable[[str, str, str], None]] = None,
         mac_resolver: Optional[Callable[[str], str]] = None,
+        portal_secret_path: str = DEFAULT_PORTAL_SECRET_PATH,
     ):
         self.host = host
         self.port = port
@@ -1068,6 +1170,7 @@ class AsyncPortalServer:
             storage=storage,
             alert_callback=alert_callback,
             mac_resolver=mac_resolver,
+            portal_secret_path=portal_secret_path,
         )
         self.httpd: Optional[HTTPServer] = None
         self.server_thread: Optional[threading.Thread] = None
