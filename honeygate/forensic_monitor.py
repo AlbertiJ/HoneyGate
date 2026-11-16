@@ -123,20 +123,29 @@ class DesktopNotificationDispatcher:
     Ejecuta subprocesos nativos hacia la utilidad 'notify-send' del sistema.
     """
     @staticmethod
+    def _sanitize_field(value: Optional[str], max_len: int) -> str:
+        text = "" if value is None else str(value)
+        text = text.replace("\r", " ").replace("\n", " ").strip()
+        return text[:max_len]
+
+    @staticmethod
     def dispatch(title: str, message: str, urgency: str = "normal", icon: str = "security-high"):
         """
         Envía una notificación gráfica visual al escritorio de Kali Linux.
         Niveles de urgencia: 'low', 'normal', 'critical'.
         """
+        safe_title = DesktopNotificationDispatcher._sanitize_field(title, 120)
+        safe_message = DesktopNotificationDispatcher._sanitize_field(message, 500)
         try:
-            # Comando nativo de Linux
+            # Comando nativo de Linux ('--' impide inyección de opciones en notify-send)
             cmd = [
                 "notify-send",
                 "-u", urgency,
                 "-a", "HoneyGate Honeywall",
                 "-i", icon,
-                title,
-                message,
+                "--",
+                safe_title,
+                safe_message,
             ]
             # Ejecución en segundo plano sin bloquear el hilo forense
             subprocess.Popen(
@@ -145,7 +154,7 @@ class DesktopNotificationDispatcher:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
-            logger.info(f"[NOTIFY-SEND] Notificación despachada: [{urgency.upper()}] {title} - {message}")
+            logger.info(f"[NOTIFY-SEND] Notificación despachada: [{urgency.upper()}] {safe_title} - {safe_message}")
         except FileNotFoundError:
             # En caso de entornos mínimos o WSL2 sin notify-send instalado
             logger.debug("[NOTIFY-SEND] 'notify-send' no disponible en este entorno gráfico.")

@@ -472,22 +472,37 @@ class InteractiveCLI:
             print(f"\033[1;31m[!] Objetivo de auditoría desconocido: {target}\033[0m")
         print()
 
+    def _resolve_module_path(self, raw_arg: str) -> Optional[str]:
+        script_arg = (raw_arg or "").strip()
+        if not script_arg:
+            return None
+        if os.path.isabs(script_arg) or script_arg.startswith(("~", "\\")):
+            return None
+        parts = script_arg.replace("\\", "/").split("/")
+        if ".." in parts:
+            return None
+        if not script_arg.endswith(".py"):
+            script_arg += ".py"
+
+        modules_root = os.path.realpath(self.completer.modules_dir)
+        candidate = os.path.realpath(os.path.join(modules_root, script_arg))
+        try:
+            if os.path.commonpath([modules_root, candidate]) != modules_root:
+                return None
+        except ValueError:
+            return None
+        if candidate == modules_root or not os.path.isfile(candidate):
+            return None
+        return candidate
+
     def _cmd_run_module(self, args: List[str]):
         if not args:
             print("\033[1;31m[!] Uso: run-module <nombre_script.py>\033[0m")
             return
-        script_arg = args[0]
-        if not script_arg.endswith(".py"):
-            script_arg += ".py"
 
-        # Resolver ruta en ./modules/
-        if os.path.exists(script_arg):
-            target_path = script_arg
-        else:
-            target_path = os.path.join(self.completer.modules_dir, script_arg)
-
-        if not os.path.exists(target_path):
-            print(f"\033[1;31m[!] Script no encontrado: {target_path}\033[0m")
+        target_path = self._resolve_module_path(args[0])
+        if target_path is None:
+            print("\033[1;31m[!] Ruta inválida o fuera de ./modules/ (operación rechazada).\033[0m")
             return
 
         print(f"\033[1;35m[*] Lanzando módulo de laboratorio: {target_path}...\033[0m")

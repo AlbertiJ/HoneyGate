@@ -1429,6 +1429,60 @@ def run_tests():
     os.environ.pop("HONEYGATE_HEADLESS", None)
     print("       -> Entorno vacío, systemd, CI read-only y exclusión data/logs en .gitignore: OK")
 
+    print("[TEST] 15. Validando endurecimiento de notify-send y restricción de run-module a modules/...")
+    from unittest.mock import patch
+    from honeygate.forensic_monitor import DesktopNotificationDispatcher
+    from honeygate.cli_console import InteractiveCLI
+
+    captured_cmds = []
+
+    def _fake_popen(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        return None
+
+    long_title = "--icon=evil\nSegunda\r" + ("T" * 200)
+    long_msg = "Linea1\nLinea2\r\n" + ("M" * 600)
+    with patch("honeygate.forensic_monitor.subprocess.Popen", side_effect=_fake_popen):
+        DesktopNotificationDispatcher.dispatch(long_title, long_msg, urgency="critical")
+
+    assert len(captured_cmds) == 1, "Debe invocarse notify-send una vez"
+    notify_cmd = captured_cmds[0]
+    assert "--" in notify_cmd, f"Falta '--' antes de title: {notify_cmd}"
+    sep_idx = notify_cmd.index("--")
+    assert len(notify_cmd) == sep_idx + 3, f"Orden inválido tras '--': {notify_cmd}"
+    sent_title = notify_cmd[sep_idx + 1]
+    sent_msg = notify_cmd[sep_idx + 2]
+    assert len(sent_title) <= 120, f"title excede 120 chars: {len(sent_title)}"
+    assert len(sent_msg) <= 500, f"message excede 500 chars: {len(sent_msg)}"
+    assert "\n" not in sent_title and "\r" not in sent_title, "title no debe tener saltos de línea"
+    assert "\n" not in sent_msg and "\r" not in sent_msg, "message no debe tener saltos de línea"
+
+    cli = InteractiveCLI(honeywall=honeywall)
+    valid_mod = cli._resolve_module_path("test_port_scan.py")
+    assert valid_mod is not None and valid_mod.startswith(os.path.realpath("modules") + os.sep)
+    assert cli._resolve_module_path("../test_honeygate.py") is None
+    assert cli._resolve_module_path("subdir/../../test_honeygate.py") is None
+    assert cli._resolve_module_path(os.path.abspath("test_honeygate.py")) is None
+    assert cli._resolve_module_path(os.path.abspath(os.path.join("modules", "test_port_scan.py"))) is None
+
+    # Verificar que un symlink dentro de modules/ hacia afuera también sea rechazado por realpath
+    with tempfile.TemporaryDirectory() as sym_root:
+        sym_modules = os.path.join(sym_root, "modules")
+        os.makedirs(sym_modules, exist_ok=True)
+        outside_script = os.path.join(sym_root, "outside.py")
+        with open(outside_script, "w", encoding="utf-8") as fh:
+            fh.write("print('outside')\n")
+        inside_link = os.path.join(sym_modules, "escape.py")
+        os.symlink(outside_script, inside_link)
+        cli.completer.modules_dir = sym_modules
+        assert cli._resolve_module_path("escape.py") is None, "Debe rechazar symlink que apunta fuera de modules/"
+
+    with patch("honeygate.cli_console.subprocess.run") as mock_run:
+        cli._cmd_run_module(["../test_honeygate.py"])
+        cli._cmd_run_module([os.path.abspath("test_honeygate.py")])
+        assert mock_run.call_count == 0, "No debe ejecutar subprocess.run con rutas fuera de modules/"
+    print("       -> notify-send ('--', 120/500 sin saltos) y run-module confinado a modules/: OK")
+
     print("\n\033[1;32m[✓] TODAS LAS PRUEBAS DE INTEGRACIÓN Y SEGURIDAD PASARON EXITOSAMENTE.\033[0m")
 
 
