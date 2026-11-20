@@ -172,6 +172,8 @@ class UserSpaceAuditHelper:
             "0B": "CLOSING",
         }
         results = []
+        if not os.path.exists("/proc/net/tcp"):
+            return results
         try:
             with open("/proc/net/tcp", "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -208,8 +210,10 @@ class UserSpaceAuditHelper:
 
     @staticmethod
     def parse_proc_net_arp() -> List[Dict[str, str]]:
-        """Lee y estructura la tabla de resolución ARP local de /proc/net/arp."""
+        """Lee y estructura la tabla de resolución ARP local de /proc/net/arp (solo Linux)."""
         entries = []
+        if not os.path.exists("/proc/net/arp"):
+            return entries
         try:
             with open("/proc/net/arp", "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -266,11 +270,11 @@ class InteractiveCLI:
             self._run_fallback_session()
 
     def _print_banner(self):
-        """Despliega el banner defensivo en la terminal de Kali Linux."""
+        """Despliega el banner defensivo en consola (Linux / WSL2 / Windows)."""
         banner = """
 \033[1;36m╔══════════════════════════════════════════════════════════════════════════╗
-║  \033[1;32mHONEYGATE DEFENSIVE HONEYWALL FRAMEWORK\033[1;36m - Kali Linux Deception Core  ║
-║  \033[0;37mEdge-Triggered epoll | Non-Root User Space | Rate-Limiting Container   \033[1;36m║
+║  \033[1;32mHONEYGATE DEFENSIVE HONEYWALL FRAMEWORK\033[1;36m - Linux / WSL2 / Windows     ║
+║  \033[0;37mepoll / selectors | Non-Root User Space | Rate-Limiting Container       \033[1;36m║
 ╚══════════════════════════════════════════════════════════════════════════╝\033[0m
         """
         print(banner)
@@ -310,7 +314,7 @@ class InteractiveCLI:
 
         while self.is_running:
             try:
-                user_input = session.prompt(HTML("<b><style fg='#00ff66'>honeygate@kali</style></b>:<b><style fg='#00d4ff'>~#</style></b> "))
+                user_input = session.prompt(HTML("<b><style fg='#00ff66'>honeygate</style></b>:<b><style fg='#00d4ff'>~&gt;</style></b> "))
                 cmd = user_input.strip()
                 if not cmd:
                     continue
@@ -335,7 +339,7 @@ class InteractiveCLI:
         """Modo de ejecución alternativo estándar en caso de no contar con prompt_toolkit."""
         while self.is_running:
             try:
-                cmd = input("\033[1;32mhoneygate@kali\033[0m:\033[1;36m~#\033[0m ").strip()
+                cmd = input("\033[1;32mhoneygate\033[0m:\033[1;36m~>\033[0m ").strip()
                 if not cmd:
                     continue
                 if cmd.lower() in ("exit", "quit"):
@@ -374,7 +378,7 @@ class InteractiveCLI:
         elif cmd == "logs":
             self._cmd_logs(args)
         elif cmd == "clear":
-            os.system("clear")
+            os.system("cls" if os.name == "nt" else "clear")
         else:
             print(f"\033[1;31m[!] Comando no reconocido: '{cmd}'. Escriba 'help' para la lista.\033[0m")
 
@@ -454,6 +458,10 @@ class InteractiveCLI:
     def _cmd_audit(self, target: str):
         print(f"\n\033[1;34m[*] Ejecutando auditoría en espacio de usuario: {target}\033[0m")
         if target in ("/proc/net/tcp", "tcp"):
+            if not os.path.exists("/proc/net/tcp"):
+                print("  Auditoría /proc/net/tcp disponible únicamente en Linux/WSL2.")
+                print()
+                return
             results = UserSpaceAuditHelper.parse_proc_net_tcp()
             print(f" Conexiones TCP identificadas en el kernel: {len(results)}")
             for r in results[:15]:
@@ -461,13 +469,17 @@ class InteractiveCLI:
             if len(results) > 15:
                 print(f"  ... y {len(results) - 15} conexiones más.")
         elif target in ("/proc/net/arp", "arp"):
+            if not os.path.exists("/proc/net/arp"):
+                print("  Auditoría /proc/net/arp disponible únicamente en Linux/WSL2.")
+                print()
+                return
             entries = UserSpaceAuditHelper.parse_proc_net_arp()
             print(f" Entradas en caché ARP: {len(entries)}")
             for e in entries:
                 print(f"  IP: {e['ip']:<16} MAC: {e['mac']:<18} Interfaz: {e['device']}")
         elif target in ("ports",):
             if self.epoll_engine:
-                print(f"  Puertos configurados en epoll: {self.epoll_engine.ports}")
+                print(f"  Puertos configurados ({self.epoll_engine.backend_name}): {self.epoll_engine.ports}")
         else:
             print(f"\033[1;31m[!] Objetivo de auditoría desconocido: {target}\033[0m")
         print()

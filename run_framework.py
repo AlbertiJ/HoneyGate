@@ -32,7 +32,21 @@ def _is_headless_mode() -> bool:
     return not sys.stdin.isatty()
 
 
+def _enable_windows_ansi():
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        except Exception:
+            pass
+
+
 def main():
+    _enable_windows_ansi()
     # Asegurar directorios de ejecución
     os.makedirs("logs", exist_ok=True)
     os.makedirs("modules", exist_ok=True)
@@ -117,7 +131,8 @@ def main():
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)
-    signal.signal(signal.SIGTERM, handle_shutdown)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, handle_shutdown)
 
     if _is_headless_mode():
         logger.info("[MAIN] Ejecutando en modo servicio headless (sin TTY interactiva).")

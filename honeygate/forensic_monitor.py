@@ -7,6 +7,7 @@ Llamadas Nativas al Kernel de Linux vía ctypes | Expresiones Regulares | notify
 
 import os
 import re
+import sys
 import json
 import time
 import ctypes
@@ -42,11 +43,17 @@ class NativeInotifyWatcher:
     Utiliza ctypes para interactuar directamente con libc.so.6 sin librerías externas pesadas.
     """
     def __init__(self):
+        if not sys.platform.startswith("linux"):
+            raise OSError("inotify nativo solo está disponible en el kernel de Linux/WSL2")
+
         try:
             self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
         except OSError:
             # Fallback para arquitecturas o entornos donde libc tiene otro enlace
             self.libc = ctypes.CDLL(None, use_errno=True)
+
+        if not hasattr(self.libc, "inotify_init1"):
+            raise OSError("libc actual no expone inotify_init1")
 
         self._init1 = self.libc.inotify_init1
         self._init1.argtypes = [ctypes.c_int]
@@ -136,6 +143,9 @@ class DesktopNotificationDispatcher:
         """
         safe_title = DesktopNotificationDispatcher._sanitize_field(title, 120)
         safe_message = DesktopNotificationDispatcher._sanitize_field(message, 500)
+        if sys.platform.startswith("win"):
+            logger.info(f"[NOTIFY-SEND] Notificación local (Windows): [{urgency.upper()}] {safe_title} - {safe_message}")
+            return
         try:
             # Comando nativo de Linux ('--' impide inyección de opciones en notify-send)
             cmd = [
@@ -187,34 +197,39 @@ class ForensicAlertManager:
         target_log_files: List[str],
         alert_history_limit: int = 200,
         storage: Optional[Any] = None,
+        force_polling: bool = False,
     ):
         self.target_files = target_log_files
         self.history_limit = alert_history_limit
         self.storage = storage
+        self.force_polling = force_polling
         self.alerts_history: List[Dict[str, Any]] = []
         self._lock = threading.RLock()
         self.file_pointers: Dict[str, int] = {}
         self.inotify_watcher: Optional[NativeInotifyWatcher] = None
+        self.monitor_backend: str = "polling" if force_polling else "auto"
         self.is_running = False
         self.monitor_thread: Optional[threading.Thread] = None
 
-    def initialize(self):
-        """Prepara los archivos a vigilar y crea el descriptor inotify."""
-        self.inotify_watcher = NativeInotifyWatcher()
+    def _prepare_target_files(self):
+        """Asegura que los archivos vigilados existan e inicializa sus offsets de lectura."""
         for file_path in self.target_files:
             abs_path = os.path.abspath(file_path)
-            # Asegurar que el archivo exista para poder suscribir el watch
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
             if not os.path.exists(abs_path):
                 with open(abs_path, "a", encoding="utf-8") as f:
                     f.write(f"# Log forense inicializado: {time.ctime()}\n")
-
-            # Posicionar el puntero al final del archivo para procesar únicamente eventos nuevos
             self.file_pointers[abs_path] = os.path.getsize(abs_path)
+
+    def initialize(self):
+        """Prepara los archivos a vigilar y crea el descriptor inotify en Linux."""
+        self.inotify_watcher = NativeInotifyWatcher()
+        self._prepare_target_files()
+        for abs_path in list(self.file_pointers.keys()):
             self.inotify_watcher.add_watch(abs_path, mask=(IN_MODIFY | IN_CLOSE_WRITE))
 
     def start_background(self) -> threading.Thread:
-        """Inicia el hilo supervisor de inotify de forma asíncrona."""
+        """Inicia el hilo supervisor forense de forma asíncrona (inotify o sondeo portable)."""
         self.is_running = True
         self.monitor_thread = threading.Thread(
             target=self._run_inotify_loop,
@@ -224,23 +239,45 @@ class ForensicAlertManager:
         self.monitor_thread.start()
         return self.monitor_thread
 
+    def _run_polling_loop(self):
+        """Bucle portable por sondeo de cambios en logs para Windows/macOS."""
+        self._prepare_target_files()
+        self.monitor_backend = "polling"
+        logger.info("[FORENSICS-LOOP] Monitor de logs portable (polling) activo para modificaciones.")
+        while self.is_running:
+            try:
+                self._process_modified_files()
+            except Exception as e:
+                logger.debug(f"[FORENSICS-POLL] Error leyendo logs: {e}")
+            time.sleep(0.2)
+
     def _run_inotify_loop(self):
         """
-        Bucle de eventos inotify sin consumo excesivo de CPU (espera pasiva en epoll/select).
+        Bucle de eventos inotify en Linux (o polling portable si inotify/epoll no está disponible).
         """
-        self.initialize()
+        use_native = (not self.force_polling) and hasattr(select, "epoll") and hasattr(select, "EPOLLIN")
+        if use_native:
+            try:
+                self.initialize()
+            except (OSError, AttributeError) as e:
+                logger.info(f"[FORENSICS-FALLBACK] inotify no disponible ({e}); usando monitoreo portable.")
+                use_native = False
+
+        if not use_native:
+            self._run_polling_loop()
+            return
+
+        self.monitor_backend = "inotify"
         poll_obj = select.epoll()
         poll_obj.register(self.inotify_watcher.fd, select.EPOLLIN)
         logger.info("[FORENSICS-LOOP] Monitor inotify activo en escucha de modificaciones de logs.")
 
         while self.is_running:
             try:
-                # Esperar hasta 1 segundo por eventos inotify; sin busy-looping
                 events = poll_obj.poll(timeout=1.0)
                 if not events:
                     continue
 
-                # Leer y drenar eventos inotify del kernel
                 raw_events = self.inotify_watcher.read_events()
                 for wd, mask, name in raw_events:
                     if mask & (IN_MODIFY | IN_CLOSE_WRITE):

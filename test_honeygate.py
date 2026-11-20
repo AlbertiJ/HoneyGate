@@ -481,7 +481,8 @@ def run_tests():
 
                     # Verificar archivo portal_secret con permisos 0600 y HMAC-SHA256 real en otp_challenges
                     assert os.path.exists(portal_secret_file), "Debe generarse portal_secret automáticamente"
-                    assert stat.S_IMODE(os.stat(portal_secret_file).st_mode) == 0o600, "portal_secret debe tener permisos 0600"
+                    if os.name != "nt":
+                        assert stat.S_IMODE(os.stat(portal_secret_file).st_mode) == 0o600, "portal_secret debe tener permisos 0600"
                     with open(portal_secret_file, "r", encoding="utf-8") as sf:
                         portal_secret_bytes = sf.read().strip().encode("utf-8")
                     expected_hmac = hmac.new(
@@ -1473,15 +1474,68 @@ def run_tests():
         with open(outside_script, "w", encoding="utf-8") as fh:
             fh.write("print('outside')\n")
         inside_link = os.path.join(sym_modules, "escape.py")
-        os.symlink(outside_script, inside_link)
-        cli.completer.modules_dir = sym_modules
-        assert cli._resolve_module_path("escape.py") is None, "Debe rechazar symlink que apunta fuera de modules/"
+        try:
+            os.symlink(outside_script, inside_link)
+            cli.completer.modules_dir = sym_modules
+            assert cli._resolve_module_path("escape.py") is None, "Debe rechazar symlink que apunta fuera de modules/"
+        except (OSError, NotImplementedError):
+            # En Windows sin privilegios de symlink/Modo Desarrollador no se crea el enlace
+            pass
 
     with patch("honeygate.cli_console.subprocess.run") as mock_run:
         cli._cmd_run_module(["../test_honeygate.py"])
         cli._cmd_run_module([os.path.abspath("test_honeygate.py")])
         assert mock_run.call_count == 0, "No debe ejecutar subprocess.run con rutas fuera de modules/"
     print("       -> notify-send ('--', 120/500 sin saltos) y run-module confinado a modules/: OK")
+
+    print("[TEST] 16. Validando motor portable multiplataforma (selectors + polling logs para Windows/macOS)...")
+    with tempfile.TemporaryDirectory() as win_tmp:
+        p_db = os.path.join(win_tmp, "portable.db")
+        p_log = os.path.join(win_tmp, "portable.log")
+        p_storage = HoneyGateStorage(db_path=p_db)
+        p_storage.update_config({"mode": 2, "honeypot_enabled": True})
+        p_hw = HoneyGateHoneywall(
+            storage=p_storage,
+            port_services={35222: "ssh", 35080: "http"},
+        )
+        p_engine = EpollNetworkEngine(
+            ports=[35222, 35080],
+            honeywall=p_hw,
+            host="127.0.0.1",
+            force_portable_selector=True,
+        )
+        assert p_engine.backend_name == "selectors"
+        p_forensics = ForensicAlertManager(
+            target_log_files=[p_log],
+            storage=p_storage,
+            force_polling=True,
+        )
+        p_engine.start_background()
+        p_forensics.start_background()
+        time.sleep(0.4)
+        try:
+            ps = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            ps.settimeout(2.0)
+            ps.connect(("127.0.0.1", 35222))
+            p_banner = ps.recv(1024).decode("utf-8", errors="ignore").strip()
+            assert p_banner == "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2", f"Banner inesperado: {p_banner}"
+            ps.sendall(b"whoami\n")
+            p_resp = ps.recv(1024).decode("utf-8", errors="ignore")
+            assert "guest" in p_resp, f"Respuesta emulada inesperada: {p_resp}"
+            ps.close()
+
+            with open(p_log, "a", encoding="utf-8") as lfh:
+                lfh.write("Failed password for admin from 203.0.113.55 port 55123 ssh2\n")
+                lfh.flush()
+            time.sleep(0.5)
+            recent = p_forensics.get_recent_alerts(limit=10)
+            assert any(a["event_type"] == "AUTH_FAILED" for a in recent), f"Polling no capturó alerta: {recent}"
+            assert p_forensics.monitor_backend == "polling"
+        finally:
+            p_forensics.stop()
+            p_engine.stop()
+            p_storage.close()
+    print("       -> Motor selectors + monitor polling multiplataforma: OK")
 
     print("\n\033[1;32m[✓] TODAS LAS PRUEBAS DE INTEGRACIÓN Y SEGURIDAD PASARON EXITOSAMENTE.\033[0m")
 

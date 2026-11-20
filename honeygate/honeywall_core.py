@@ -9,13 +9,18 @@ Compatible con Kali Linux y entornos WSL2
 import os
 import sys
 import time
-import fcntl
 import socket
 import select
+import selectors
 import logging
 import threading
 from collections import deque
 from typing import Dict, Tuple, Optional, List, Any, Callable
+
+try:
+    import fcntl
+except ImportError:  # Windows no dispone de fcntl
+    fcntl = None
 
 from honeygate.deception import (
     EmulatedServiceEngine,
@@ -444,8 +449,9 @@ class HoneyGateHoneywall:
 
 class EpollNetworkEngine:
     """
-    Motor de E/S Asíncrona de Bajo Nivel basado en select.epoll con Edge-Triggered (EPOLLET).
-    Gestiona servidores no bloqueantes en puertos altos (>1024) en espacio de usuario.
+    Motor de E/S Asíncrona de Bajo Nivel.
+    Usa select.epoll Edge-Triggered (EPOLLET) y fcntl en Linux/WSL2, con fallback
+    portable basado en selectors.DefaultSelector en Windows y macOS.
     """
     def __init__(
         self,
@@ -455,6 +461,7 @@ class EpollNetworkEngine:
         max_line_bytes: int = MAX_LINE_BYTES,
         max_commands_per_session: int = MAX_COMMANDS_PER_SESSION,
         max_session_duration_sec: float = MAX_SESSION_DURATION_SEC,
+        force_portable_selector: bool = False,
     ):
         self.ports = ports
         self.honeywall = honeywall
@@ -463,20 +470,87 @@ class EpollNetworkEngine:
         self.max_line_bytes = max(32, int(max_line_bytes))
         self.max_commands_per_session = max(1, int(max_commands_per_session))
         self.max_session_duration_sec = max(0.05, float(max_session_duration_sec))
-        self.epoll = select.epoll()
+        self.use_epoll = (
+            (not force_portable_selector)
+            and hasattr(select, "epoll")
+            and hasattr(select, "EPOLLIN")
+        )
+        if self.use_epoll:
+            self.epoll = select.epoll()
+            self.selector = None
+            self.backend_name = "epoll"
+        else:
+            self.epoll = None
+            self.selector = selectors.DefaultSelector()
+            self.backend_name = "selectors"
         self.server_sockets: Dict[int, socket.socket] = {}
+        self._tracked_sockets: Dict[int, socket.socket] = {}
         self.is_running = False
         self.server_thread: Optional[threading.Thread] = None
 
     @staticmethod
     def set_socket_nonblocking(sock: socket.socket):
         """
-        Configura el socket como no bloqueante (O_NONBLOCK) mediante la biblioteca fcntl de Linux.
-        Garantiza operaciones asíncronas puras sin colgar el bucle de eventos.
+        Configura el socket como no bloqueante usando fcntl en POSIX o setblocking(False) en Windows.
         """
-        fd = sock.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        if fcntl is not None and hasattr(os, "O_NONBLOCK"):
+            fd = sock.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        else:
+            sock.setblocking(False)
+
+    def _register_socket(self, fd: int, sock: socket.socket, include_write: bool = False):
+        self._tracked_sockets[fd] = sock
+        if self.use_epoll:
+            mask = select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
+            if include_write:
+                mask |= select.EPOLLOUT
+            self.epoll.register(fd, mask)
+        else:
+            events = selectors.EVENT_READ | (selectors.EVENT_WRITE if include_write else 0)
+            self.selector.register(sock, events, data=fd)
+
+    def _modify_socket(self, fd: int, include_write: bool = False):
+        if self.use_epoll:
+            mask = select.EPOLLIN | select.EPOLLET | select.EPOLLERR | select.EPOLLHUP
+            if not include_write:
+                mask |= select.EPOLLPRI
+            else:
+                mask |= select.EPOLLOUT
+            self.epoll.modify(fd, mask)
+        else:
+            sock = self._tracked_sockets.get(fd)
+            if sock is not None:
+                events = selectors.EVENT_READ | (selectors.EVENT_WRITE if include_write else 0)
+                self.selector.modify(sock, events, data=fd)
+
+    def _unregister_socket(self, fd: int):
+        sock = self._tracked_sockets.pop(fd, None)
+        if self.use_epoll:
+            try:
+                self.epoll.unregister(fd)
+            except OSError:
+                pass
+        else:
+            try:
+                self.selector.unregister(fd)
+            except (KeyError, ValueError, OSError):
+                if sock is not None:
+                    try:
+                        self.selector.unregister(sock)
+                    except (KeyError, ValueError, OSError):
+                        pass
+
+    def _prune_closed_selector_fds(self):
+        if self.use_epoll or self.selector is None:
+            return
+        for fd, sock in list(self._tracked_sockets.items()):
+            try:
+                if sock.fileno() < 0:
+                    self._unregister_socket(fd)
+            except OSError:
+                self._unregister_socket(fd)
 
     def _init_server_sockets(self):
         """Inicializa los sockets de escucha en puertos altos no privilegiados (>1024)."""
@@ -485,23 +559,18 @@ class EpollNetworkEngine:
                 raise ValueError(f"El puerto {port} requiere privilegios root. Use puertos altos (>1024).")
 
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Reutilización rápida de dirección y puerto a nivel kernel (SO_REUSEADDR)
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_sock.bind((self.host, port))
             server_sock.listen(128)
 
-            # Aplicar O_NONBLOCK con fcntl
             self.set_socket_nonblocking(server_sock)
 
             server_fd = server_sock.fileno()
             self.server_sockets[server_fd] = server_sock
 
-            # Registrar en epoll con Edge-Triggered (EPOLLET) y EPOLLIN
-            self.epoll.register(
-                server_fd,
-                select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
-            )
-            logger.info(f"[EPOLL-INIT] Escuchando en {self.host}:{port} (FD={server_fd}) en modo Edge-Triggered.")
+            self._register_socket(server_fd, server_sock, include_write=False)
+            mode_label = "Edge-Triggered (epoll)" if self.use_epoll else "portable (selectors)"
+            logger.info(f"[EPOLL-INIT] Escuchando en {self.host}:{port} (FD={server_fd}) en modo {mode_label}.")
 
     def _sweep_expired_sessions(self):
         """Cierra sesiones emuladas que superaron la duración máxima permitida."""
@@ -535,38 +604,52 @@ class EpollNetworkEngine:
 
     def run_event_loop(self):
         """
-        Bucle de eventos principal epoll (Edge-Triggered).
-        Procesa eventos I/O asíncronos y atiende descargas de buffers hasta agotar EAGAIN.
+        Bucle de eventos principal (epoll Edge-Triggered en Linux, selectors en Windows/macOS).
         """
         self._init_server_sockets()
         self.is_running = True
-        logger.info("[EPOLL-LOOP] Bucle de red asíncrono Edge-Triggered iniciado.")
+        logger.info(f"[EPOLL-LOOP] Bucle de red asíncrono ({self.backend_name}) iniciado.")
 
         try:
             while self.is_running:
-                try:
-                    events = self.epoll.poll(timeout=0.1)
-                except InterruptedError:
-                    continue
+                if self.use_epoll:
+                    try:
+                        events = self.epoll.poll(timeout=0.1)
+                    except InterruptedError:
+                        continue
 
-                self._sweep_expired_sessions()
+                    self._sweep_expired_sessions()
 
-                for fd, event in events:
-                    # 1. Eventos en sockets de escucha del servidor (Nuevas conexiones entrantes)
-                    if fd in self.server_sockets:
-                        self._handle_server_accept(fd)
+                    for fd, event in events:
+                        if fd in self.server_sockets:
+                            self._handle_server_accept(fd)
+                        elif event & (select.EPOLLHUP | select.EPOLLERR):
+                            self._handle_client_error(fd)
+                        elif event & select.EPOLLIN:
+                            self._handle_client_read(fd)
+                        elif event & select.EPOLLOUT:
+                            self._handle_client_write(fd)
+                else:
+                    try:
+                        events = self.selector.select(timeout=0.1)
+                    except InterruptedError:
+                        continue
+                    except (OSError, ValueError):
+                        self._prune_closed_selector_fds()
+                        time.sleep(0.05)
+                        continue
 
-                    # 2. Eventos de error o desconexión en clientes (EPOLLHUP / EPOLLERR)
-                    elif event & (select.EPOLLHUP | select.EPOLLERR):
-                        self._handle_client_error(fd)
+                    self._sweep_expired_sessions()
 
-                    # 3. Datos listos para lectura (EPOLLIN)
-                    elif event & select.EPOLLIN:
-                        self._handle_client_read(fd)
-
-                    # 4. Datos listos para escritura (EPOLLOUT)
-                    elif event & select.EPOLLOUT:
-                        self._handle_client_write(fd)
+                    for key, mask in events:
+                        fd = key.data
+                        if fd in self.server_sockets:
+                            self._handle_server_accept(fd)
+                        else:
+                            if mask & selectors.EVENT_READ:
+                                self._handle_client_read(fd)
+                            if (mask & selectors.EVENT_WRITE) and fd in self.honeywall.sessions_by_fd:
+                                self._handle_client_write(fd)
 
         except Exception as e:
             logger.exception(f"[EPOLL-FATAL] Excepción imprevista en event loop: {e}")
@@ -575,32 +658,23 @@ class EpollNetworkEngine:
 
     def _handle_server_accept(self, server_fd: int):
         """
-        Acepta todas las conexiones entrantes en el socket servidor hasta vaciar la cola (EAGAIN),
-        como exige la semántica Edge-Triggered de epoll.
+        Acepta todas las conexiones entrantes en el socket servidor hasta vaciar la cola.
         """
         server_sock = self.server_sockets[server_fd]
         while True:
             try:
                 client_sock, (client_ip, client_port) = server_sock.accept()
             except BlockingIOError:
-                # En modo Edge-Triggered, EAGAIN / EWOULDBLOCK indica que no quedan conexiones pendientes
                 break
             except OSError:
                 break
 
-            # Configurar descriptor cliente inmediatamente como no bloqueante mediante fcntl
             self.set_socket_nonblocking(client_sock)
             client_fd = client_sock.fileno()
 
             try:
-                # Registrar sesión en el Honeywall perimetral
                 session = self.honeywall.register_connection(client_fd, client_sock, client_ip, client_port)
-
-                # Registrar en epoll en modo Edge-Triggered
-                self.epoll.register(
-                    client_fd,
-                    select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
-                )
+                self._register_socket(client_fd, client_sock, include_write=False)
 
                 # Enviar banner estático realista por servicio (sin revelar señuelo ni abrir red)
                 banner = EmulatedServiceEngine.banner_for_service(session.service)
@@ -622,20 +696,14 @@ class EpollNetworkEngine:
             return True
         client_fd = session.fd
         if not self.honeywall.evaluate_outbound_traffic(client_fd, frame_size=len(payload)):
-            try:
-                self.epoll.unregister(client_fd)
-            except OSError:
-                pass
+            self._unregister_socket(client_fd)
             return False
         try:
             session.sock.send(payload)
         except BlockingIOError:
             try:
-                self.epoll.modify(
-                    client_fd,
-                    select.EPOLLIN | select.EPOLLOUT | select.EPOLLET | select.EPOLLHUP | select.EPOLLERR
-                )
-            except OSError:
+                self._modify_socket(client_fd, include_write=True)
+            except (KeyError, ValueError, OSError):
                 pass
         except (BrokenPipeError, ConnectionResetError, OSError):
             self._unregister_and_close(client_fd, "Error enviando respuesta emulada")
@@ -920,18 +988,15 @@ class EpollNetworkEngine:
                 break
 
     def _handle_client_write(self, client_fd: int):
-        """Gestiona el evento EPOLLOUT cuando el socket está disponible para drenar buffers pendientes."""
+        """Gestiona disponibilidad de escritura cuando se drena un buffer pendiente."""
         session = self.honeywall.sessions_by_fd.get(client_fd)
         if not session:
             return
 
         # Restablecer máscara para escuchar únicamente lecturas
         try:
-            self.epoll.modify(
-                client_fd,
-                select.EPOLLIN | select.EPOLLET | select.EPOLLPRI | select.EPOLLERR | select.EPOLLHUP
-            )
-        except OSError:
+            self._modify_socket(client_fd, include_write=False)
+        except (KeyError, ValueError, OSError):
             pass
 
     def _handle_client_error(self, client_fd: int):
@@ -939,11 +1004,8 @@ class EpollNetworkEngine:
         self._unregister_and_close(client_fd, "Evento EPOLLHUP o EPOLLERR detectado")
 
     def _unregister_and_close(self, client_fd: int, reason: str):
-        """Elimina el descriptor de epoll y delega la desconexión al Honeywall."""
-        try:
-            self.epoll.unregister(client_fd)
-        except OSError:
-            pass
+        """Elimina el descriptor del multiplexor y delega la desconexión al Honeywall."""
+        self._unregister_socket(client_fd)
         self.honeywall.terminate_session(client_fd, reason)
 
     def start_background(self) -> threading.Thread:
@@ -957,25 +1019,29 @@ class EpollNetworkEngine:
         return self.server_thread
 
     def stop(self):
-        """Detiene el bucle epoll y libera los descriptores."""
+        """Detiene el bucle de eventos y libera los descriptores."""
         self.is_running = False
         self._cleanup()
 
     def _cleanup(self):
-        """Cierra sockets de servidor y desmantela el descriptor de epoll."""
+        """Cierra sockets de servidor y desmantela el multiplexor (epoll/selector)."""
         for fd, sock in list(self.server_sockets.items()):
-            try:
-                self.epoll.unregister(fd)
-            except OSError:
-                pass
+            self._unregister_socket(fd)
             try:
                 sock.close()
             except OSError:
                 pass
         self.server_sockets.clear()
+        self._tracked_sockets.clear()
 
-        try:
-            self.epoll.close()
-        except OSError:
-            pass
-        logger.info("[EPOLL-CLEANUP] Descriptores de sockets y epoll liberados.")
+        if self.epoll is not None:
+            try:
+                self.epoll.close()
+            except OSError:
+                pass
+        if self.selector is not None:
+            try:
+                self.selector.close()
+            except OSError:
+                pass
+        logger.info("[EPOLL-CLEANUP] Descriptores de sockets y multiplexor liberados.")
